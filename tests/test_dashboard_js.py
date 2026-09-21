@@ -455,14 +455,17 @@ const button = (tree, text) => nodes(tree).find((node) => node.tag === "button" 
 """
 
 
-def test_token_submission_refreshes_status_and_authorized_targets():
+def test_managed_dashboard_token_submission_refreshes_status_and_authorized_targets():
     script = PAGE_HARNESS + r"""
 (async()=>{
+sdk.managedAuthentication=true;
 const baseFetch=fetchOverride, tokens=new Map();
 window.sessionStorage={getItem:key=>tokens.get(key)||'',
   setItem:(key,value)=>tokens.set(key,value),removeItem:key=>tokens.delete(key)};
 fetchOverride=(url,body,opts)=>{
-  if(opts.headers['x-talk-token']!=='fixture-token') throw new Error('401: Talk token required');
+  if(opts.headers['x-talk-token']!=='fixture-token') {
+    throw new Error('hermes-talk dashboard routes require the TALK_DASHBOARD_TOKEN token');
+  }
   return baseFetch(url,body);
 };
 render(); await drain();
