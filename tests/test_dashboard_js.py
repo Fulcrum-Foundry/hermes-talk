@@ -455,9 +455,10 @@ const button = (tree, text) => nodes(tree).find((node) => node.tag === "button" 
 """
 
 
-def test_token_submission_refreshes_status_and_authorized_targets():
+def test_managed_dashboard_token_submission_refreshes_status_and_authorized_targets():
     script = PAGE_HARNESS + r"""
 (async()=>{
+sdk.managedAuthentication=true;
 const baseFetch=fetchOverride, tokens=new Map();
 window.sessionStorage={getItem:key=>tokens.get(key)||'',
   setItem:(key,value)=>tokens.set(key,value),removeItem:key=>tokens.delete(key)};

@@ -61,7 +61,9 @@ function createTalkSurface(SDK) {
   async function apiCall(path, init, timeoutMs) {
     const opts = Object.assign({}, init || {});
     const headers = Object.assign({}, opts.headers || {});
-    const token = SDK.managedAuthentication ? "" : readToken();
+    // Hermes-managed dashboard auth and Talk's x-talk-token gate are independent.
+    // Hosted dashboards still need the operator-supplied Talk token.
+    const token = readToken();
     if (token) headers["x-talk-token"] = token;
     if (opts.body) headers["content-type"] = "application/json";
     opts.headers = headers;
