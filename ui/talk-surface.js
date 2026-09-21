@@ -836,7 +836,8 @@ function createTalkSurface(SDK) {
 
   /** fetchJSON throws Error("<status>: <body>") — the gate's refusals look like this. */
   function isAuthError(err) {
-    return /^(401|403)\b/.test(String((err && err.message) || ""));
+    const message = String((err && err.message) || "");
+    return /^(401|403)\b/.test(message) || /\bTALK_DASHBOARD_TOKEN\b/.test(message);
   }
 
   function errorText(err) {

@@ -463,7 +463,9 @@ const baseFetch=fetchOverride, tokens=new Map();
 window.sessionStorage={getItem:key=>tokens.get(key)||'',
   setItem:(key,value)=>tokens.set(key,value),removeItem:key=>tokens.delete(key)};
 fetchOverride=(url,body,opts)=>{
-  if(opts.headers['x-talk-token']!=='fixture-token') throw new Error('401: Talk token required');
+  if(opts.headers['x-talk-token']!=='fixture-token') {
+    throw new Error('hermes-talk dashboard routes require the TALK_DASHBOARD_TOKEN token');
+  }
   return baseFetch(url,body);
 };
 render(); await drain();
