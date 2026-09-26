@@ -19,6 +19,7 @@ import talk_cli
 import talk_host
 import talk_identity
 import talk_operator_auth
+import talk_realtime
 import talk_relay
 
 
@@ -2317,3 +2318,58 @@ def test_cli_mint_keeps_manual_response_and_semantic_detection(monkeypatch):
                            automatic_response=False, turn_detection=detection)
     assert seen[0]["automatic_response"] is False
     assert seen[0]["turn_detection"] is detection
+
+
+def test_announcement_context_delete_waits_for_its_response(monkeypatch):
+    # A finished run is announced as AddContext -> StartResponse -> RemoveContext.
+    # Sent back to back, gpt-realtime-2.1 applies the delete before the
+    # response reads the item and the model says "I don't have the result yet".
+    # The delete must follow the response, not ride the same batch.
+    monkeypatch.setattr(talk_cli, "ANNOUNCE_IDLE_POLL_S", 0.01)
+
+    async def scenario():
+        announce_queue: asyncio.Queue = asyncio.Queue()
+        busy = {"value": False}
+        writes: list[tuple[tuple[type, ...], bool]] = []
+
+        async def send_batch(batch, *, is_announcement=False):
+            writes.append((tuple(type(c) for c in batch), busy["value"]))
+            if any(isinstance(c, talk_realtime.StartResponse) for c in batch):
+                busy["value"] = True  # the announcement response is now running
+            return True
+
+        delivered = []
+        pump = asyncio.create_task(
+            talk_cli.pump_announcements(
+                announce_queue, _StubRelay(), None, send_batch, lambda: busy["value"]
+            )
+        )
+        run = {"runId": 7, "status": "done", "output": "73 and sunny"}
+        announce_queue.put_nowait(
+            talk_cli.QueuedAnnouncement(
+                talk_cli.run_finished_commands(run), lambda: delivered.append(7)
+            )
+        )
+        await asyncio.sleep(0.1)
+        before_done = list(writes)
+        busy["value"] = False  # response.done
+        for _ in range(200):
+            if len(writes) > 1:
+                break
+            await asyncio.sleep(0.01)
+        pump.cancel()
+        return before_done, writes, delivered
+
+    before_done, writes, delivered = asyncio.run(scenario())
+    assert before_done == [((talk_realtime.AddContext, talk_realtime.StartResponse), False)]
+    assert writes[1] == ((talk_realtime.RemoveContext,), False)
+    assert delivered == [7]
+
+
+def test_split_announcement_cleanup_leaves_other_batches_alone():
+    add = talk_realtime.AddContext(item_id="x", text="t")
+    start = talk_realtime.StartResponse(allow_tools=False)
+    remove = talk_realtime.RemoveContext(item_id="x")
+    assert talk_cli._split_announcement_cleanup([add, start, remove]) == ([add, start], [remove])
+    assert talk_cli._split_announcement_cleanup([remove, add]) == ([remove, add], [])
+    assert talk_cli._split_announcement_cleanup([add, remove]) == ([add, remove], [])

@@ -737,6 +737,71 @@ def _announcement_starved(on_starved, waited: float) -> None:
         on_starved(waited)
 
 
+#: Bounds for the deferred announcement-context delete. The response must be
+#: seen starting within the first bound and finishing within the second; past
+#: either, the delete is sent anyway so the untrusted item never outlives the
+#: announcement by more than this.
+ANNOUNCE_CLEANUP_START_S = 5.0
+ANNOUNCE_CLEANUP_DONE_S = 60.0
+
+
+def _split_announcement_cleanup(batch):
+    """Split trailing context deletes off a self-deleting announcement batch.
+
+    The announcement contract is AddContext -> StartResponse -> RemoveContext.
+    Sent back to back, gpt-realtime-2.1 applies the delete before the response
+    reads the item, so the model announces with the report already gone ("I
+    don't have the result yet") although the run finished. The delete must
+    follow the response, not the create. Only a trailing run of RemoveContext
+    after a StartResponse is split; any other batch is returned unchanged.
+    """
+
+    commands = list(batch)
+    if not any(isinstance(c, talk_realtime.StartResponse) for c in commands):
+        return batch, []
+    tail: list = []
+    while commands and isinstance(commands[-1], talk_realtime.RemoveContext):
+        tail.insert(0, commands.pop())
+    if not tail or not commands or not isinstance(commands[-1], talk_realtime.StartResponse):
+        return batch, []
+    return commands, tail
+
+
+def _chain_cleanup(on_sent, cleanup, relay, ws, send_batch, response_busy):
+    """on_sent hook that also schedules the deferred delete after the response."""
+
+    def busy() -> bool:
+        return bool(response_busy() if response_busy is not None else relay.response_active)
+
+    async def run_cleanup() -> None:
+        deadline = time.monotonic() + ANNOUNCE_CLEANUP_START_S
+        while not busy() and time.monotonic() < deadline:
+            await asyncio.sleep(ANNOUNCE_IDLE_POLL_S)
+        deadline = time.monotonic() + ANNOUNCE_CLEANUP_DONE_S
+        while busy() and time.monotonic() < deadline:
+            await asyncio.sleep(ANNOUNCE_IDLE_POLL_S)
+        try:
+            if send_batch is None:
+                for command in cleanup:
+                    await ws.send_json(talk_openai_realtime.encode_command(command))
+            else:
+                await send_batch(cleanup)
+        except Exception as exc:  # noqa: BLE001 - a failed delete must not kill the call
+            _log.warning("announcement context cleanup failed: %s", type(exc).__name__)
+
+    def fire() -> None:
+        _announcement_sent(on_sent)
+        task = asyncio.get_running_loop().create_task(run_cleanup())
+        _CLEANUP_TASKS.add(task)
+        task.add_done_callback(_CLEANUP_TASKS.discard)
+
+    return fire
+
+
+#: Strong refs so a pending cleanup task is not garbage collected mid-wait.
+_CLEANUP_TASKS: set = set()
+
+
 async def pump_announcements(
     announce_queue, relay, ws, send_batch=None, response_busy=None, on_starved=None
 ) -> None:
@@ -768,6 +833,11 @@ async def pump_announcements(
             batch, on_sent = queued.commands, queued.on_sent
         else:
             batch, on_sent = queued, None
+        batch, cleanup = _split_announcement_cleanup(batch)
+        if cleanup:
+            # The announcement's own context delete waits for its response to
+            # read the item (see _split_announcement_cleanup).
+            on_sent = _chain_cleanup(on_sent, cleanup, relay, ws, send_batch, response_busy)
         # Per BATCH, not per wait loop: a batch declined by send_batch goes
         # round again, and its clock must keep running across that retry.
         waiting_since: float | None = None
