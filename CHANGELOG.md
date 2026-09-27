@@ -11,7 +11,7 @@ but 0.4.0's release title named only the steering verb. They are recorded
 below under 0.4.0 — the first version that shipped them — with the gap
 named rather than smoothed.
 
-## [0.22.0a1] — 2026-09-26
+## [0.22.0] — 2026-09-26
 
 Truthful outcomes for delegated work and a policy hook for the lane that
 starts a session. Fulcrum fork; driven by the hermes-sip-live-voice
