@@ -7,6 +7,7 @@ say?" need a canonical, untrusted-labelled retrieval path keyed by exact job.
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -50,7 +51,8 @@ def test_record_persists_full_output_privately_and_a_bounded_summary(tmp_path):
     assert len(entry["spoken_summary"]) <= talk_results.SPOKEN_SUMMARY_CHARS
     path = tmp_path / "state" / talk_results.RESULTS_DIRNAME / "1.txt"
     assert path.read_text() == long
-    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":  # Windows has no POSIX mode bits
+        assert oct(path.stat().st_mode & 0o777) == "0o600"
     assert len(entry["brief_version"]) == 12
 
 
