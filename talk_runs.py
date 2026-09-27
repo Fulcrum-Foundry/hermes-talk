@@ -1400,6 +1400,16 @@ def release_process(run_id: int) -> None:
         _PROCESSES.pop(run_id, None)
 
 
+#: run_ids whose detached child was terminated by stop_work, so the worker
+#: that reaps the exit can call it cancelled rather than failed.
+_STOP_REQUESTED: set[int] = set()
+
+
+def stop_was_requested(run_id: int) -> bool:
+    with _PROCESS_LOCK:
+        return run_id in _STOP_REQUESTED
+
+
 def terminate_process(run_id: int) -> bool:
     """Terminate a retained detached child. True iff a live handle was hit."""
 
@@ -1410,6 +1420,8 @@ def terminate_process(run_id: int) -> bool:
     try:
         if process.poll() is not None:  # type: ignore[attr-defined]
             return False
+        with _PROCESS_LOCK:
+            _STOP_REQUESTED.add(run_id)
         process.terminate()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — a dead/foreign handle is "not stopped"
         return False
@@ -1470,6 +1482,8 @@ def reset_for_tests() -> None:
     with _RUN_LOCK:
         _RUNS.clear()
         _RESERVATIONS.clear()
+    with _PROCESS_LOCK:
+        _STOP_REQUESTED.clear()
         _RUN_SEQ = 0
         _RESERVATION_SEQ = 0
     with _PROCESS_LOCK:
@@ -1521,6 +1535,7 @@ __all__ = [
     "run_outcome",
     "start_run",
     "started_sentinel",
+    "stop_was_requested",
     "terminate_process",
     "wait_process",
 ]

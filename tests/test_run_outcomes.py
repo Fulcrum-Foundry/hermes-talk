@@ -364,3 +364,42 @@ def test_stop_acknowledgement_never_claims_the_outcome(monkeypatch):
     gate.set()
     run = _wait_terminal(run_id)
     assert talk_runs.run_outcome(run) == talk_runs.OUTCOME_CANCELLED
+
+
+def test_a_detached_child_killed_by_stop_work_is_cancelled_not_failed(monkeypatch, tmp_path):
+    """Live sim: 'cancel that job' on the detached lane recorded outcome=failed (exit -15)."""
+
+    import sys as _sys
+
+    sleeper = [_sys.executable, "-c", "import time; time.sleep(30)"]
+    monkeypatch.setattr(talk_host, "agent_argv", lambda binary, task, profile: sleeper)
+    monkeypatch.setattr(talk_host, "STOP_CONFIRM_WAIT_S", 3.0)
+    run_id = talk_runs.start_run(
+        "agent", "long job", talk_host._detached_agent_worker("go", _sys.executable)
+    )
+    deadline = time.time() + 3
+    while time.time() < deadline and talk_runs.get_process(run_id) is None:
+        time.sleep(0.02)
+    assert talk_runs.get_process(run_id) is not None
+    ack = talk_host.host().stop_work(str(run_id))
+    assert "Stopped run" in ack or "stop" in ack.lower()
+    run = _wait_terminal(run_id, timeout=6.0)
+    assert run["status"] == "failed"
+    assert talk_runs.run_outcome(run) == talk_runs.OUTCOME_CANCELLED
+    assert "operator's request" in run["output"]
+    assert "was cancelled" in _spoken(run)
+
+
+def test_delivery_evidence_is_a_receipt_not_a_gate():
+    """Live sim: gating the flip on acks left every result 'undelivered' and re-adopted
+    on the next call. Evidence rides the run meta; the flip still happens on send."""
+
+    import talk_delivery
+
+    snapshot = {"audible_ms": 0, "acknowledged": False, "dequeued_ms": 480}
+    assert talk_delivery.stage(dict(snapshot, injected=True)) == talk_delivery.INJECTED
+    assert not talk_delivery.is_delivered(snapshot)
+    acked = {"audible_ms": 480, "acknowledged": True, "ms": 480}
+    assert talk_delivery.is_delivered(acked)
+    assert talk_delivery.stage(acked) == talk_delivery.DELIVERED
+

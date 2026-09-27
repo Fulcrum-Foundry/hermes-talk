@@ -11,6 +11,28 @@ but 0.4.0's release title named only the steering verb. They are recorded
 below under 0.4.0 — the first version that shipped them — with the gap
 named rather than smoothed.
 
+## [0.24.1] — 2026-09-27
+
+### Fixed
+- `delegate_task` no longer refuses a `target` that matches nothing installed.
+  Only genuine ambiguity (two installed candidates) blocks and asks; a phrase
+  that is a topic rather than a repo ("Indianapolis weather") rides the brief
+  as unresolved and the work proceeds. Found in a live simulator call where
+  the assistant asked for "the exact target identifier" instead of starting a
+  weather lookup. The tool description now says when to pass `target`.
+- Ready records adopted from an EARLIER call (durable binding) no longer open
+  the conversation: the deferred scheduler holds them until the caller's first
+  finalized turn, so a call never starts with "run nine is ready". Found in a
+  live simulator call after the binding landed.
+- A detached child that `stop_work`/`cancel_job` terminated is recorded and
+  spoken as CANCELLED, not failed ("exited -15"). Found in a live simulator
+  call.
+- `LanePolicy.delivery_evidence` is a receipt, not a gate: the acknowledged
+  state at send time is recorded as ``meta.delivery``; the exactly-once
+  delivered flip happens on send as before. Gating on acks (which are always
+  zero at send time) left every spoken result undelivered and re-offered it
+  on each later call. Found in a live simulator call.
+
 ## [0.24.0] — 2026-09-27
 
 Auditable delegation and continuity across calls: the final slice of the

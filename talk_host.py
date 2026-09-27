@@ -442,14 +442,28 @@ def _detached_agent_worker(task: str, binary: str) -> Any:
         stdout = (out or "").strip()
         if process.returncode != 0:
             detail = (err or "").strip() or stdout or "no output"
-            message = f"the agent exited {process.returncode}: {detail}"[
-                -talk_runs.HISTORY_OUTPUT_CAP :
-            ]
-            # Mark it failed HERE rather than raising: an exception would put
-            # a type name in front of a message meant to be spoken. Returning
+            # Our own stop_work sends SIGTERM (-15 here, 1/0xC000013A on
+            # Windows via TerminateProcess); that death is a CANCELLATION the
+            # operator asked for, not a failure (hermes-sip-live-voice#49).
+            # Anything else that exits non-zero failed.
+            stopped = talk_runs.stop_was_requested(run_id)
+            if stopped:
+                message = (
+                    f"the agent was stopped at the operator's request (exit {process.returncode})"
+                )
+                outcome = talk_runs.OUTCOME_CANCELLED
+            else:
+                message = f"the agent exited {process.returncode}: {detail}"[
+                    -talk_runs.HISTORY_OUTPUT_CAP :
+                ]
+                outcome = talk_runs.OUTCOME_FAILED
+            # Mark it HERE rather than raising: an exception would put a type
+            # name in front of a message meant to be spoken. Returning
             # afterwards is safe — terminal transitions are first-writer-wins,
             # so the registry's own done-transition is a no-op.
-            talk_runs.finish_run(run_id, "failed", message)
+            talk_runs.finish_run(
+                run_id, "failed", message, outcome=outcome, exit_code=process.returncode
+            )
             return message
         return (stdout or "the agent finished without printing anything")[
             : talk_runs.HISTORY_OUTPUT_CAP

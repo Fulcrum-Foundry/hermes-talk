@@ -32,6 +32,7 @@ def _fast(monkeypatch):
     talk_controls.reset_for_tests()
     talk_announce.reset_for_tests()
     talk_controls.attach_session()
+    talk_controls.note_conversation_started()  # scenarios are mid-call unless stated
     yield
     talk_controls.reset_for_tests()
     talk_announce.reset_for_tests()
@@ -398,3 +399,25 @@ def test_blockers_name_every_state_for_diagnostics():
     }
     immediate = talk_announce.Scheduler("immediate", answer_pending=lambda: False)
     assert immediate.blockers() == []
+
+
+def test_a_ready_record_adopted_at_connect_waits_for_the_caller_to_speak():
+    """Reconnect adoption parks results before anyone has spoken; the caller opens, not the
+    notice (hermes-sip-live-voice#51). A finalized user turn lifts the block."""
+
+    async def run():
+        talk_controls.attach_session()  # fresh call: nobody has spoken yet
+        get_run = _runs((9, "weather", "done"))
+        queue, wire, _scheduler, pump = _scenario("deferred", get_run)
+        flips: list[int] = []
+        await queue.put(_completion(9, "weather", flips))
+        await _settle(0.6)
+        before = list(wire.headlines())
+        talk_controls.note_conversation_started()
+        await _settle(0.6)
+        pump.cancel()
+        return before, wire.headlines()
+
+    before, after = asyncio.run(run())
+    assert before == [], "spoke a ready record before the caller said anything"
+    assert any("ready" in h.lower() for h in after), after

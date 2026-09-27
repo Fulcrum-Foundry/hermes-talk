@@ -61,6 +61,7 @@ KIND_CONTROL = "control"  # microphone flips, landed notes: caller-triggered rec
 BLOCK_CALLER_SPEAKING = "caller_speaking"
 BLOCK_ANSWER_PENDING = "answer_pending"
 BLOCK_HOLD = "hold"
+BLOCK_NOT_STARTED = "conversation_not_started"
 BLOCK_CLOSING = "closing"
 BLOCK_TOPIC_DEFERRED = "topic_deferred"
 
@@ -126,6 +127,10 @@ class Scheduler:
             # or a topic deferral — only by the caller's own speech and an
             # in-flight answer.
             return found
+        if not talk_controls.conversation_started():
+            # A ready record from an EARLIER call (adopted at connect) must
+            # not be the first thing the caller hears; the caller opens.
+            found.append(BLOCK_NOT_STARTED)
         if talk_controls.is_holding():
             found.append(BLOCK_HOLD)
         if talk_controls.is_closing():
