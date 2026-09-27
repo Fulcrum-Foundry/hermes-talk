@@ -36,29 +36,31 @@ STAGES = (STORED, QUEUED, INJECTED, SPOKEN, DELIVERED)
 
 
 def is_delivered(notice: dict[str, Any] | None) -> bool:
-    """Delivered only on transport evidence: ``acked``/``acknowledged`` True, or ``audible_ms > 0``.
+    """Delivered only on transport evidence, and only for the WHOLE notice.
 
-    ``injected``/``dequeued``/``played_ms`` never count: those describe the
-    sender's side of the wire. An ``interrupted`` notice with zero audible
-    audio is not delivered even if acknowledged in the transport's own sense
-    (the mark for cleared audio arrives after a clear).
+    Evidence is ``acked``/``acknowledged`` True or ``audible_ms > 0``.
+    ``injected``/``dequeued``/``played_ms`` never count: they describe the
+    sender's side of the wire. A notice the transport reports as
+    ``interrupted`` is not delivered — partial audio is not the result — and
+    when the notice carries its full length (``ms``), the acknowledged audible
+    span must cover it.
     """
 
     if not isinstance(notice, dict):
         return False
+    if notice.get("interrupted") is True:
+        return False
     audible = notice.get("audible_ms")
     numeric = isinstance(audible, (int, float)) and not isinstance(audible, bool)
     audible_ms = audible if numeric else 0
-    if audible_ms > 0:
-        return True
+    total = notice.get("ms")
+    total_ms = total if isinstance(total, (int, float)) and not isinstance(total, bool) else None
     acked = notice.get("acked")
     if acked is None:
         acked = notice.get("acknowledged")
-    if acked is True:
-        # An ack with no measured audio is still an ack — unless the transport
-        # tells us the item was cut before anything played.
-        return not (notice.get("interrupted") is True and "audible_ms" in notice)
-    return False
+    if total_ms is not None and total_ms > 0:
+        return audible_ms >= total_ms and (acked is True or audible_ms > 0)
+    return acked is True or audible_ms > 0
 
 
 def stage(notice: dict[str, Any] | None) -> str:

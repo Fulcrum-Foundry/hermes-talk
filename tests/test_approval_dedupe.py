@@ -153,9 +153,10 @@ def test_delivery_requires_a_transport_ack_never_mere_injection():
     assert not talk_delivery.is_delivered({"injected": True})
     assert not talk_delivery.is_delivered({"injected": True, "dequeued_ms": 400, "played_ms": 400})
     assert not talk_delivery.is_delivered({"injected": True, "interrupted": True, "audible_ms": 0})
-    assert not talk_delivery.is_delivered(
-        {"acknowledged": True, "interrupted": True, "audible_ms": 0}
-    )
+    assert not talk_delivery.is_delivered({"acknowledged": True, "interrupted": True})
+    # Partial audio of a known-length notice is not delivery of the result.
+    assert not talk_delivery.is_delivered({"acknowledged": True, "audible_ms": 400, "ms": 2000})
+    assert talk_delivery.is_delivered({"acknowledged": True, "audible_ms": 2000, "ms": 2000})
     assert talk_delivery.is_delivered({"acked": True})
     assert talk_delivery.is_delivered({"acknowledged": True, "audible_ms": 0})
     assert talk_delivery.is_delivered({"injected": True, "audible_ms": 200})
@@ -175,9 +176,9 @@ def test_replay_notice_shape_interrupted_is_not_delivered():
         "kind": "result",
         "ms": 2000,
         "injected": True,
-        "audible_ms": 0,
-        "dequeued_ms": 600,
-        "acknowledged": False,
+        "audible_ms": 400,
+        "dequeued_ms": 540,
+        "acknowledged": True,
         "interrupted": True,
     }
     assert not talk_delivery.is_delivered(notice)
