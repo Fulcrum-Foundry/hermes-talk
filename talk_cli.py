@@ -1700,6 +1700,22 @@ def _with_verbosity(pack: str | None, verbosity: str | None) -> str | None:
     return f"{pack}\n\n{line}" if pack else line
 
 
+def _capture_and_mark_started(append_turn):
+    """Wrap the transcript sink: the first finalized USER turn opens the conversation.
+
+    Until then the deferred scheduler holds back ready records adopted from an
+    earlier call, so a caller is never greeted with "run nine is ready" before
+    saying a word (hermes-sip-live-voice#51).
+    """
+
+    def sink(role: str, text: str) -> None:
+        if role == "user":
+            talk_controls.note_conversation_started()
+        append_turn(role, text)
+
+    return sink
+
+
 async def run_talk_session(
     audio: object | None = None,
     *,
@@ -1986,7 +2002,7 @@ async def run_talk_session(
     relay = RealtimeRelay(
         on_audio=audio.queue_playback,
         on_caption=on_caption,
-        on_transcript_turn=capture.append_turn,
+        on_transcript_turn=_capture_and_mark_started(capture.append_turn),
         on_barge_in=on_barge_in,
         on_error=on_error,
         tool_authorizer=(

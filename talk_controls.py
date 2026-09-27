@@ -50,6 +50,7 @@ _LOCK = threading.Lock()
 _ATTACHED = False
 _ON_CHANGE: Callable[[str, object], None] | None = None
 _HOLD = False
+_STARTED = False
 _TOPIC_DEFERRED = False
 _CLOSING = False
 _CALLER_SPEAKING = False
@@ -59,11 +60,13 @@ _VERBOSITY: str | None = None
 def attach_session(on_change: Callable[[str, object], None] | None = None) -> None:
     """Bind the live session. Every state starts neutral: a new call inherits nothing."""
 
-    global _ATTACHED, _ON_CHANGE, _HOLD, _TOPIC_DEFERRED, _CLOSING, _CALLER_SPEAKING, _VERBOSITY
+    global _ATTACHED, _ON_CHANGE, _HOLD, _TOPIC_DEFERRED, _CLOSING, _CALLER_SPEAKING
+    global _VERBOSITY, _STARTED
     with _LOCK:
         _ATTACHED = True
         _ON_CHANGE = on_change
         _HOLD = False
+        _STARTED = False
         _TOPIC_DEFERRED = False
         _CLOSING = False
         _CALLER_SPEAKING = False
@@ -71,11 +74,13 @@ def attach_session(on_change: Callable[[str, object], None] | None = None) -> No
 
 
 def detach_session() -> None:
-    global _ATTACHED, _ON_CHANGE, _HOLD, _TOPIC_DEFERRED, _CLOSING, _CALLER_SPEAKING, _VERBOSITY
+    global _ATTACHED, _ON_CHANGE, _HOLD, _TOPIC_DEFERRED, _CLOSING, _CALLER_SPEAKING
+    global _VERBOSITY, _STARTED
     with _LOCK:
         _ATTACHED = False
         _ON_CHANGE = None
         _HOLD = False
+        _STARTED = False
         _TOPIC_DEFERRED = False
         _CLOSING = False
         _CALLER_SPEAKING = False
@@ -188,6 +193,20 @@ def is_closing() -> bool:
 # -- caller speaking -----------------------------------------------------------
 
 
+
+def note_conversation_started() -> None:
+    """The caller has spoken (a final user turn) or heard a real reply."""
+
+    global _STARTED
+    with _LOCK:
+        _STARTED = True
+
+
+def conversation_started() -> bool:
+    with _LOCK:
+        return _STARTED
+
+
 def note_caller_speaking(active: bool) -> None:
     """Track VAD speech_started/stopped so a notice never starts over the caller."""
 
@@ -252,6 +271,7 @@ __all__ = [
     "VERBOSITY_DETAILED",
     "attach_session",
     "clear_topic_deferral",
+    "conversation_started",
     "defer_topic",
     "detach_session",
     "enter_hold",
@@ -261,6 +281,7 @@ __all__ = [
     "is_topic_deferred",
     "leave_hold",
     "note_caller_speaking",
+    "note_conversation_started",
     "request_close",
     "reset_for_tests",
     "set_verbosity",

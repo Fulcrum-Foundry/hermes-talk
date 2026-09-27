@@ -20,6 +20,10 @@ named rather than smoothed.
   as unresolved and the work proceeds. Found in a live simulator call where
   the assistant asked for "the exact target identifier" instead of starting a
   weather lookup. The tool description now says when to pass `target`.
+- Ready records adopted from an EARLIER call (durable binding) no longer open
+  the conversation: the deferred scheduler holds them until the caller's first
+  finalized turn, so a call never starts with "run nine is ready". Found in a
+  live simulator call after the binding landed.
 
 ## [0.24.0] — 2026-09-27
 
