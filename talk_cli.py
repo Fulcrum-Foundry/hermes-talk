@@ -40,6 +40,7 @@ from dataclasses import dataclass
 
 try:
     from . import (
+        talk_announce,
         talk_apiserver,
         talk_approvals,
         talk_audio,
@@ -48,6 +49,7 @@ try:
         talk_cascade_voice,
         talk_check,
         talk_config,
+        talk_controls,
         talk_diagnostics,
         talk_doctor,
         talk_gemini_realtime,
@@ -71,6 +73,7 @@ try:
     )
     from .talk_relay import RealtimeRelay
 except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path load)
+    import talk_announce
     import talk_apiserver
     import talk_approvals
     import talk_audio
@@ -79,6 +82,7 @@ except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path
     import talk_cascade_voice
     import talk_check
     import talk_config
+    import talk_controls
     import talk_diagnostics
     import talk_doctor
     import talk_gemini_realtime
@@ -714,11 +718,16 @@ class QueuedAnnouncement:
     trade against never saying it at all.
     """
 
-    __slots__ = ("commands", "on_sent")
+    __slots__ = ("commands", "kind", "on_sent", "run_id")
 
-    def __init__(self, commands, on_sent=None) -> None:
+    def __init__(self, commands, on_sent=None, *, kind=None, run_id=None) -> None:
         self.commands = commands
         self.on_sent = on_sent
+        #: What this batch IS for the scheduler (talk_announce.KIND_*). None
+        #: reads as routine: deferrable, never urgent (hermes-sip-live-voice#51).
+        self.kind = kind or talk_announce.KIND_ROUTINE
+        #: The run a progress notice is about, for revalidation before speech.
+        self.run_id = run_id
 
 
 def _announcement_sent(on_sent) -> None:
@@ -804,8 +813,47 @@ def _chain_cleanup(on_sent, cleanup, relay, ws, send_batch, response_busy):
 _CLEANUP_TASKS: set = set()
 
 
+#: How long the pump waits for a queued batch before checking whether a
+#: coalesced ready notice is due. Only the deferred policy polls; immediate
+#: blocks on the queue exactly as before.
+ANNOUNCE_NOTICE_POLL_S = 0.25
+
+
+async def _next_batch(announce_queue, scheduler, busy):
+    """The next batch to consider: a queued one, or a synthesized ready notice.
+
+    The notice is minted only at a natural pause — queue empty, wire idle,
+    nothing blocking routine speech — so it is never queued behind an
+    approval or spoken over the caller (hermes-sip-live-voice#51).
+    """
+
+    if scheduler is None or not scheduler.deferred:
+        return await announce_queue.get()
+    while True:
+        try:
+            return await asyncio.wait_for(announce_queue.get(), ANNOUNCE_NOTICE_POLL_S)
+        except TimeoutError:
+            pass
+        if (
+            scheduler.pending_notice()
+            and not busy()
+            and scheduler.may_speak(talk_announce.KIND_ROUTINE)
+        ):
+            commands = scheduler.notice_commands()
+            if commands:
+                return QueuedAnnouncement(
+                    commands, scheduler.notice_on_sent(), kind=talk_announce.KIND_ROUTINE
+                )
+
+
 async def pump_announcements(
-    announce_queue, relay, ws, send_batch=None, response_busy=None, on_starved=None
+    announce_queue,
+    relay,
+    ws,
+    send_batch=None,
+    response_busy=None,
+    on_starved=None,
+    scheduler=None,
 ) -> None:
     """Serialize every out-of-band announcement (Codex v0.6.1 finding 3).
 
@@ -827,14 +875,36 @@ async def pump_announcements(
     :data:`ANNOUNCE_STARVATION_WARN_S`. Deferring is correct behaviour, so
     this is not an error — but a predicate that never clears is
     indistinguishable from a quiet session unless something says so.
+
+    ``scheduler`` (:class:`talk_announce.Scheduler`) is the conversation-state
+    half of the gate (hermes-sip-live-voice#51). ``None`` — every caller
+    before 0.23 — is the immediate policy: this loop behaves exactly as it
+    did. With a deferred scheduler, routine batches also wait for the caller
+    to stop speaking / hold / closing / "later"; completions are parked as
+    ready records and ONE coalesced notice is emitted at a natural pause;
+    progress notices are revalidated against the run right before speech.
     """
 
+    def busy() -> bool:
+        return bool(response_busy() if response_busy is not None else relay.response_active)
+
     while True:
-        queued = await announce_queue.get()
+        queued = await _next_batch(announce_queue, scheduler, busy)
         if isinstance(queued, QueuedAnnouncement):
-            batch, on_sent = queued.commands, queued.on_sent
+            batch, on_sent, kind, run_id = (
+                queued.commands, queued.on_sent, queued.kind, queued.run_id
+            )
         else:
-            batch, on_sent = queued, None
+            batch, on_sent, kind, run_id = queued, None, talk_announce.KIND_ROUTINE, None
+        if scheduler is not None and scheduler.deferred:
+            if kind == talk_announce.KIND_COMPLETION and run_id is not None:
+                # A completion is a READY RECORD, not speech: parked until the
+                # caller asks or a natural pause offers it (coalesced).
+                scheduler.park_completion(run_id, batch, on_sent)
+                continue
+            if not scheduler.still_valid(kind, run_id):
+                # An obsolete "still working" after the run finished: dropped.
+                continue
         batch, cleanup = _split_announcement_cleanup(batch)
         if cleanup:
             # The announcement's own context delete waits for its response to
@@ -845,7 +915,11 @@ async def pump_announcements(
         waiting_since: float | None = None
         starved = False
         while True:
-            while response_busy() if response_busy is not None else relay.response_active:
+            while busy() or (scheduler is not None and not scheduler.may_speak(kind)):
+                if scheduler is not None and not scheduler.still_valid(kind, run_id):
+                    # The run finished while this progress notice waited.
+                    batch = None
+                    break
                 if waiting_since is None:
                     waiting_since = time.monotonic()
                 elif not starved and ANNOUNCE_STARVATION_WARN_S > 0:
@@ -854,6 +928,12 @@ async def pump_announcements(
                         starved = True
                         _announcement_starved(on_starved, waited)
                 await asyncio.sleep(ANNOUNCE_IDLE_POLL_S)
+            if batch is None:
+                break
+            if scheduler is not None and not scheduler.still_valid(kind, run_id):
+                # Last look before the wire: the run may have finished in the
+                # same tick the wire went idle (hermes-sip-live-voice#51).
+                break
             try:
                 if send_batch is None:
                     for out in batch:
@@ -1568,6 +1648,52 @@ def _host_summary_line() -> str | None:
     )
 
 
+#: Lane tool names treated as the end-call control. A lane handler under one
+#: of these names is wrapped so the session's ``closing`` state is set the
+#: instant the model invokes it — before the lane's physical hangup — and no
+#: routine notice can be spoken behind it (hermes-sip-live-voice#57, #51).
+END_CALL_TOOL_NAMES = frozenset({"end_call", "hang_up", "hangup"})
+
+
+def _wrap_end_call(handlers):
+    """Lane handlers with the end-call one marking the session closing first."""
+
+    wrapped = dict(handlers or {})
+    for name in list(wrapped):
+        if name not in END_CALL_TOOL_NAMES:
+            continue
+        inner = wrapped[name]
+
+        def closing_first(arguments, _inner=inner):
+            talk_controls.request_close()
+            return _inner(arguments)
+
+        wrapped[name] = closing_first
+    return wrapped
+
+
+#: The lane's spoken-depth default, rendered as one line of the operating pack
+#: (hermes-sip-live-voice#57). The caller's own set_verbosity call overrides
+#: it for the session through the tool result, not through the prompt.
+VERBOSITY_LINES = {
+    talk_controls.VERBOSITY_CONCISE: (
+        "Default spoken depth for this call: concise — lead with the answer in "
+        "one or two sentences; requested reports and briefs stay complete."
+    ),
+    talk_controls.VERBOSITY_DETAILED: (
+        "Default spoken depth for this call: detailed — fuller explanations are "
+        "welcome when they help."
+    ),
+}
+
+
+def _with_verbosity(pack: str | None, verbosity: str | None) -> str | None:
+    line = VERBOSITY_LINES.get(str(verbosity or "").strip().lower())
+    if line is None:
+        return pack
+    return f"{pack}\n\n{line}" if pack else line
+
+
 async def run_talk_session(
     audio: object | None = None,
     *,
@@ -1687,6 +1813,11 @@ async def run_talk_session(
         resume_control = None
 
     policy = talk_lane.coerce(lane_policy, lane)
+    # Conversational controls (hermes-sip-live-voice#57) bind before the tool
+    # list is built: hold/resume/defer/verbosity are built-in tools and the
+    # lane's own end_call is wrapped below so "closing" is set even by a lane
+    # that never heard of talk_controls.
+    talk_controls.attach_session()
     try:
         tools = (
             host_execution_attachment.tool_definitions()
@@ -1704,7 +1835,7 @@ async def run_talk_session(
                         f"lane tool {extra.get('name')!r} collides with a built-in tool"
                     )
             tools = [*tools, *policy.tools]
-            talk_tools.register_lane_handlers(policy.handlers)
+            talk_tools.register_lane_handlers(_wrap_end_call(policy.handlers))
     except Exception as exc:  # noqa: BLE001 - host attachment startup boundary
         print(f"talk: host tool setup failed: {type(exc).__name__}", file=sys.stderr)
         # The legacy lane reaches this handler with NO attachment (its tools
@@ -1713,6 +1844,7 @@ async def run_talk_session(
         # surfaced to the operator as an unrelated crash instead of a reason.
         if host_execution_attachment is not None:
             host_execution_attachment.close()
+        talk_controls.detach_session()
         return refuse(STARTUP_REFUSAL_TOOLS)
     # The live-catalog section rides every lane. A cold process used to lose
     # the race between the background warm above and this mint — the FIRST
@@ -1729,7 +1861,7 @@ async def run_talk_session(
         lane=lane,
         host_summary=_host_summary_line() if lane == "cli" else None,
         capabilities=talk_capabilities.instruction_section(catalog_snapshot),
-        lane_instructions=policy.rendered_instructions(),
+        lane_instructions=_with_verbosity(policy.rendered_instructions(), policy.verbosity),
     )
     _log.info("talk lane policy: %s", json.dumps(policy.receipt(), default=str))
 
@@ -1885,6 +2017,7 @@ async def run_talk_session(
         talk_lifecycle.detach_session()
         talk_progress.detach_session()
         talk_approvals.detach_session()
+        talk_controls.detach_session()
         if authorization_ledger is not None:
             authorization_ledger.clear()
         audio.stop()
@@ -1902,6 +2035,7 @@ async def run_talk_session(
         talk_lifecycle.detach_session()
         talk_progress.detach_session()
         talk_approvals.detach_session()
+        talk_controls.detach_session()
         if authorization_ledger is not None:
             authorization_ledger.clear()
         audio.stop()
@@ -2031,6 +2165,8 @@ async def run_talk_session(
                                 lambda: talk_runs.mark_delivered(
                                     run_id, claimant=talk_session_id
                                 ),
+                                kind=talk_announce.KIND_COMPLETION,
+                                run_id=run_id,
                             )
                         )
                     return
@@ -2051,7 +2187,11 @@ async def run_talk_session(
                         continue
                     commands = run_phase_commands(run, milestone)
                     if commands:
-                        await announce_queue.put(QueuedAnnouncement(commands))
+                        await announce_queue.put(
+                            QueuedAnnouncement(
+                                commands, kind=talk_announce.KIND_PROGRESS, run_id=run_id
+                            )
+                        )
 
         tool_coordinator = ToolResponseCoordinator(
             (
@@ -2131,6 +2271,14 @@ async def run_talk_session(
                 if isinstance(event, talk_realtime.ProviderFailure) and event.terminal:
                     relay.handle_realtime_event(event)
                     raise talk_realtime.RealtimeSessionError(event.detail)
+                # The scheduler's caller_speaking state (hermes-sip-live-
+                # voice#51): the same VAD events the relay already sees.
+                if isinstance(event, talk_realtime.SpeechStarted):
+                    talk_controls.note_caller_speaking(True)
+                elif isinstance(
+                    event, (talk_realtime.SpeechStopped, talk_realtime.InputAudioCommitted)
+                ):
+                    talk_controls.note_caller_speaking(False)
                 if isinstance(event, talk_realtime.ResponseStarted):
                     continuation_pending = False
                 if isinstance(event, talk_realtime.FunctionCall):
@@ -2216,19 +2364,24 @@ async def run_talk_session(
                         QueuedAnnouncement(
                             commands,
                             on_sent=lambda: talk_approvals.note_prompt_sent(run_id),
+                            kind=talk_announce.KIND_APPROVAL,
                         )
                     )
             elif event.get("kind") == talk_approvals.EVENT_APPROVAL_OUTCOME:
                 commands = approval_outcome_commands(event)
                 if commands:
-                    announce_queue.put_nowait(QueuedAnnouncement(commands))
+                    announce_queue.put_nowait(
+                        QueuedAnnouncement(commands, kind=talk_announce.KIND_APPROVAL)
+                    )
 
         def on_note_landed(subagent_id: str) -> None:
             """Queue a landed steering note on the session loop."""
 
             commands = landed_note_commands(subagent_id)
             if commands:
-                announce_queue.put_nowait(commands)
+                announce_queue.put_nowait(
+                    QueuedAnnouncement(commands, kind=talk_announce.KIND_CONTROL)
+                )
 
         def on_pause_change(paused: bool, source: str) -> None:
             """Receipt for a microphone flip (hermes-talk#100), from any thread.
@@ -2244,7 +2397,9 @@ async def run_talk_session(
                 print(f"\ntalk: microphone {state}{hint}", flush=True)
                 commands = input_pause_commands(paused, source)
                 if commands:
-                    announce_queue.put_nowait(commands)
+                    announce_queue.put_nowait(
+                        QueuedAnnouncement(commands, kind=talk_announce.KIND_CONTROL)
+                    )
 
             with suppress(RuntimeError):  # loop closed while the flip was in flight
                 loop.call_soon_threadsafe(deliver)
@@ -2314,6 +2469,8 @@ async def run_talk_session(
                         lambda rid=orphan_id: talk_runs.mark_delivered(
                             rid, claimant=talk_session_id
                         ),
+                        kind=talk_announce.KIND_COMPLETION,
+                        run_id=orphan_id,
                     )
                 )
         # The notifier fires on host drain threads; marshal back onto this loop.
@@ -2321,6 +2478,23 @@ async def run_talk_session(
             lambda sid: loop.call_soon_threadsafe(on_note_landed, sid)
         )
 
+        def answer_pending() -> bool:
+            return bool(
+                relay.response_active
+                or continuation_pending
+                or bool(tool_coordinator.outputs)
+                or speaker_busy()
+            )
+
+        # The conversation-state gate (hermes-sip-live-voice#51). Attached so
+        # check_work/get_result on the tool thread reach the same ready ledger
+        # the pump drains. The immediate policy (every session before 0.23,
+        # and every session without a LanePolicy) passes NO scheduler, so the
+        # pump call is byte-for-byte what it was — tests that swap the pump
+        # with a positional double keep working.
+        scheduler = talk_announce.Scheduler(policy.announcements, answer_pending=answer_pending)
+        talk_announce.attach_session(scheduler)
+        pump_extra = {"scheduler": scheduler} if scheduler.deferred else {}
         sender = asyncio.create_task(send_microphone())
         pump = asyncio.create_task(
             pump_announcements(
@@ -2337,6 +2511,7 @@ async def run_talk_session(
                 lambda waited: on_error(
                     f"an update has been waiting {waited:.0f}s for a safe opening"
                 ),
+                **pump_extra,
             )
         )
         tool_worker = asyncio.create_task(tool_coordinator.run())
@@ -2377,6 +2552,8 @@ async def run_talk_session(
             # so further dispatch is refused rather than accepted into a void.
             talk_runs.detach_owner()
             talk_pause.detach_session(audio)
+            talk_announce.detach_session()
+            talk_controls.detach_session()
             sender.cancel()
             pump.cancel()
             receiver.cancel()
@@ -2421,6 +2598,8 @@ async def run_talk_session(
         talk_progress.detach_session()
         talk_approvals.detach_session()
         talk_pause.detach_session(audio)
+        talk_announce.detach_session()
+        talk_controls.detach_session()
         if keyboard_stop is not None:
             keyboard_stop()
         if authorization_ledger is not None:

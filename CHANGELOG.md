@@ -11,6 +11,38 @@ but 0.4.0's release title named only the steering verb. They are recorded
 below under 0.4.0 — the first version that shipped them — with the gap
 named rather than smoothed.
 
+## [0.23.0] — 2026-09-27
+
+Conversation controls, a quiet announcement policy, one consent rule, and a
+result ledger. Fulcrum fork; hermes-sip-live-voice #57, #51, #52, #55.
+
+### Added
+- Tools `hold`, `resume`, `cancel_job`, `set_verbosity` (`talk_controls`).
+  "Stop" means stop talking, never cancel; hold cuts playback, keeps
+  listening and suppresses routine notices until `resume`; `cancel_job`
+  needs a run number and answers "stop requested" until the typed outcome
+  arrives; verbosity changes spoken depth only. `CONTROL_POLICY` in the
+  preamble names which words mean which intent.
+- `talk_announce.Scheduler` and `LanePolicy.announcements`
+  (`"immediate"` default, `"deferred"` for phones): with deferral,
+  completions become READY RECORDS instead of speech, one coalesced notice
+  is offered at a natural pause (no caller speech, no response in flight,
+  not holding, not closing), "later" suppresses repeats, and queued
+  progress/heartbeat notices are revalidated against the run right before
+  the wire so an obsolete "still working" never plays after completion.
+  Approval prompts are never coalesced or dropped.
+- `talk_identity.CONSENT_POLICY`: the permission rule as one table.
+  Requested read/search/draft/delegate actions run without confirmation;
+  consequential actions go through the host approval flow bound to one
+  exact action; an approval is consumed by the action it named. The
+  contradictory "offer to hand it to an agent, and ask" sentence is gone.
+- `talk_results` ledger and tool `get_result`: every terminal run writes a
+  private full-output file plus an index record (label, run id, api ids,
+  brief hash, outcome, spoken summary, superseded_by). Retrieval by run
+  number, label fragment or ordinal in REQUEST order ("the second outlook
+  one"); ambiguity asks; output is paged and framed as untrusted data; a
+  same-label later request supersedes the earlier one.
+
 ## [0.22.0] — 2026-09-26
 
 Truthful outcomes for delegated work and a policy hook for the lane that

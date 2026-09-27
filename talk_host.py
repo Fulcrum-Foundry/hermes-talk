@@ -648,6 +648,26 @@ def _api_server_worker(task: str, *, session_id: str | None) -> Any:
     return worker
 
 
+def _brief_meta(prompt: str) -> dict:
+    """The delegated brief's version stamp, recorded at acceptance.
+
+    The result ledger (hermes-sip-live-voice#55) tells two same-label runs
+    apart by the hash of the brief they were given, and that hash has to be
+    minted BEFORE the run so a record written at the terminal transition
+    carries it. Lazy import: talk_results imports talk_runs, which this module
+    already imports; nothing here is needed at import time.
+    """
+
+    try:
+        try:
+            from . import talk_results
+        except ImportError:  # pragma: no cover - flat-module fallback
+            import talk_results
+        return {"brief_version": talk_results.brief_version(prompt)}
+    except Exception:  # noqa: BLE001 — a missing stamp, never a refused run
+        return {}
+
+
 def _resolve_persona() -> str:
     """The operator's SOUL.md, via Hermes's own loader.
 
@@ -1243,6 +1263,7 @@ class HostAdapter:
                 "agent",
                 label,
                 _api_server_worker(prompt, session_id=None),
+                meta=_brief_meta(prompt),
                 execution_mode=execution_mode,
                 resource_keys=resource_keys,
             )
@@ -1277,6 +1298,7 @@ class HostAdapter:
                 "agent",
                 label,
                 _detached_agent_worker(prompt, binary),
+                meta=_brief_meta(prompt),
                 execution_mode=execution_mode,
                 resource_keys=resource_keys,
             )

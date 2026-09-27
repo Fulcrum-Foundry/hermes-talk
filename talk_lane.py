@@ -48,6 +48,16 @@ class LanePolicy:
         own; unknown names are refused by the normal tool contract.
     ``on_end_call``: called when the model invokes the lane's end-call tool
         (if the lane exposed one). The lane owns the physical teardown.
+    ``announcements``: how routine background notices reach the caller
+        (hermes-sip-live-voice#51). ``"immediate"`` (default) is the
+        pre-0.23 behaviour: spoken as soon as the wire is idle.
+        ``"deferred"`` parks completions as ready records and offers ONE
+        coalesced notice at a natural pause; routine speech is suppressed
+        while the caller speaks, during hold, after "later", and once the
+        call is closing. Approval questions are never deferred past the pause.
+    ``verbosity``: the lane's default spoken depth (``"concise"`` /
+        ``"detailed"``), or ``None`` for the preamble's own default. The
+        caller can flip it per session with ``set_verbosity`` (#57).
     ``manifest``: free-form producer facts (what was included, omitted,
         truncated) for the diagnostics receipt. Never read by the model.
     """
@@ -60,6 +70,8 @@ class LanePolicy:
     tools: tuple[dict, ...] = ()
     handlers: dict[str, Callable[[dict], Any]] = field(default_factory=dict)
     on_end_call: Callable[[], Any] | None = None
+    announcements: str = "immediate"
+    verbosity: str | None = None
     manifest: dict[str, Any] = field(default_factory=dict)
 
     def rendered_instructions(self) -> str | None:
@@ -90,6 +102,8 @@ class LanePolicy:
             "instructions_truncated": self.truncated,
             "spoken_heartbeats": self.spoken_heartbeats,
             "memory_review": self.memory_review,
+            "announcements": self.announcements,
+            "verbosity": self.verbosity,
             "tools": [t.get("name") for t in self.tools if isinstance(t, dict)],
             "manifest": dict(self.manifest),
         }

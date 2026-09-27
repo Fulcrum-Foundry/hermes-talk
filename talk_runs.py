@@ -892,8 +892,30 @@ def finish_run(
             run["meta"].update(fields)
         run["updated"] = time.time()
         tee = _terminal_tee_locked(run_id, run)
+        # The ledger gets the UNTRUNCATED output (hermes-sip-live-voice#55);
+        # the tee above is capped for history.
+        ledger_view = {**tee, "output": str(run["output"] or "")}
     _append_history(tee)
+    _record_result(run_id, ledger_view)
     return True
+
+
+def _record_result(run_id: int, run: dict) -> None:
+    """Write the run's result-ledger record (talk_results). Never fails the run.
+
+    Imported lazily: talk_results reads this module's outcome constants, so a
+    module-level import would be a cycle. Tests that swap the ledger do so by
+    monkeypatching ``talk_results.record``.
+    """
+
+    try:
+        try:
+            from . import talk_results
+        except ImportError:  # pragma: no cover - flat-module fallback
+            import talk_results
+        talk_results.record(run_id, run)
+    except Exception as exc:  # noqa: BLE001 — the ledger is a side effect, not the run
+        _log.debug("result ledger skipped for run %s: %s", run_id, type(exc).__name__)
 
 
 def _terminal_tee_locked(run_id: int, run: dict) -> dict:

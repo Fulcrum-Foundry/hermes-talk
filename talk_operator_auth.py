@@ -48,6 +48,10 @@ _PERMIT_REFUSAL_EVENT_KEY = "_talk_permit_refusal"
 #: voice is unreachable once paused (nobody is heard), so a speaker who is
 #: not the operator can at worst mute listening until the operator's own
 #: control brings it back; the pause is never a path to authority.
+#: The conversational controls (hermes-sip-live-voice#57) are read-only by the
+#: same reasoning: hold, resume, defer_updates and set_verbosity only shape
+#: what THIS session says, and get_result reads a ledger this session wrote.
+#: cancel_job is stop_work by another name and is gated exactly like it.
 READ_ONLY_TALK_TOOLS = frozenset(
     {
         "search_memory",
@@ -57,10 +61,22 @@ READ_ONLY_TALK_TOOLS = frozenset(
         "talk_status",
         "talk_capabilities",
         "pause_voice_input",
+        "hold",
+        "resume",
+        "set_verbosity",
+        "defer_updates",
+        "get_result",
     }
 )
 MUTATING_TALK_TOOLS = frozenset(
-    {"delegate_task", "steer_agent", "redirect_agent", "stop_work", "resolve_approval"}
+    {
+        "delegate_task",
+        "steer_agent",
+        "redirect_agent",
+        "stop_work",
+        "cancel_job",
+        "resolve_approval",
+    }
 )
 
 MUTATION_DENIAL = (
@@ -231,6 +247,7 @@ _TARGET_ARGUMENT_KEYS = {
     "steer_agent": "agent_id",
     "redirect_agent": "agent_id",
     "stop_work": "target",
+    "cancel_job": "run_id",
 }
 
 
@@ -296,6 +313,13 @@ def _canonical_call(name: Any, arguments: Any) -> tuple[str, str | None]:
         key = _TARGET_ARGUMENT_KEYS.get(name)
         if key is not None:
             candidate = parsed.get(key)
+            if isinstance(candidate, bool):
+                candidate = None
+            elif isinstance(candidate, int):
+                # cancel_job's run_id is an integer; the spoken cross-check
+                # matches its decimal form, which is how the assistant's own
+                # transcript names a run ("run 12").
+                candidate = str(candidate)
             if isinstance(candidate, str) and candidate:
                 target = candidate
     return digest, target
