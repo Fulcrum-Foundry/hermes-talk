@@ -225,10 +225,11 @@ _TOOL_DELEGATE_TASK: dict = {
             "target": {
                 "type": "string",
                 "description": (
-                    "The repository, plugin or project the task is about, exactly as "
-                    "the operator said it. It is resolved against what is installed "
-                    "here and the brief carries both the heard phrase and the match; "
-                    "if it is ambiguous you will be told what to ask."
+                    "ONLY when the task is about a specific installed repository, plugin "
+                    "or project: its name exactly as the operator said it. It is resolved "
+                    "against what is installed here and the brief carries both the heard "
+                    "phrase and the match; if ambiguous you will be told what to ask. Leave "
+                    "it out for lookups, questions and general tasks."
                 ),
             },
         },
@@ -766,14 +767,14 @@ def _handle_delegate_task(arguments: dict) -> str:
     except ValueError as exc:
         return f"delegate_task could not build the brief: {exc}."
     if brief.target is not None and brief.target.get("resolved") is None:
+        # Only AMBIGUITY blocks: two installed things could be meant, so ask
+        # (hermes-sip-live-voice#54). A phrase that matches nothing installed
+        # is not a reason to refuse — "Indianapolis weather" is a topic, not a
+        # repo — so the brief carries it as unresolved and the work proceeds.
         resolution = talk_targets.Resolution(**brief.target)
         question = resolution.question()
         if question:
             return f"I can't tell which target you mean. {question}"
-        return (
-            f"I don't know a project called {brief.target.get('heard')!r} on this install — "
-            "ask the operator for the exact name or path before delegating."
-        )
     return talk_host.host().run_agent(
         brief.render(),
         background is not False,

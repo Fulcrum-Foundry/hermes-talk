@@ -11,6 +11,16 @@ but 0.4.0's release title named only the steering verb. They are recorded
 below under 0.4.0 — the first version that shipped them — with the gap
 named rather than smoothed.
 
+## [0.24.1] — 2026-09-27
+
+### Fixed
+- `delegate_task` no longer refuses a `target` that matches nothing installed.
+  Only genuine ambiguity (two installed candidates) blocks and asks; a phrase
+  that is a topic rather than a repo ("Indianapolis weather") rides the brief
+  as unresolved and the work proceeds. Found in a live simulator call where
+  the assistant asked for "the exact target identifier" instead of starting a
+  weather lookup. The tool description now says when to pass `target`.
+
 ## [0.24.0] — 2026-09-27
 
 Auditable delegation and continuity across calls: the final slice of the

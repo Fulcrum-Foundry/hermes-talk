@@ -257,10 +257,14 @@ def test_delegate_refuses_an_ambiguous_target_with_one_question(monkeypatch):
     )
     assert host.calls == []
     assert out.startswith("I can't tell which target you mean. Did you mean")
-    unknown = talk_tools.execute_talk_tool(
-        "delegate_task", {"task": "audit it", "target": "banana phone"}
-    )
-    assert host.calls == [] and "don't know a project called" in unknown
+    # A phrase matching NOTHING installed is not ambiguity: it is a topic, not a
+    # repo, and must not block the work (the real Bob sim was refused for
+    # "Indianapolis weather"). The brief carries it as unresolved.
+    talk_tools.execute_talk_tool("delegate_task", {"task": "audit it", "target": "banana phone"})
+    assert len(host.calls) == 1
+    rendered, brief = host.calls[0][0], host.calls[0][-1]
+    assert "banana phone" in rendered
+    assert brief.target["resolved"] is None and not brief.target["alternatives"]
 
 
 def test_envelope_meta_rides_the_run_record():
