@@ -45,11 +45,13 @@ try:
         talk_approvals,
         talk_audio,
         talk_auth,
+        talk_binding,
         talk_capabilities,
         talk_cascade_voice,
         talk_check,
         talk_config,
         talk_controls,
+        talk_delivery,
         talk_diagnostics,
         talk_doctor,
         talk_gemini_realtime,
@@ -66,6 +68,7 @@ try:
         talk_realtime,
         talk_runs,
         talk_setup,
+        talk_snapshot,
         talk_steer,
         talk_tools,
         talk_transcript,
@@ -78,11 +81,13 @@ except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path
     import talk_approvals
     import talk_audio
     import talk_auth
+    import talk_binding
     import talk_capabilities
     import talk_cascade_voice
     import talk_check
     import talk_config
     import talk_controls
+    import talk_delivery
     import talk_diagnostics
     import talk_doctor
     import talk_gemini_realtime
@@ -99,6 +104,7 @@ except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path
     import talk_realtime
     import talk_runs
     import talk_setup
+    import talk_snapshot
     import talk_steer
     import talk_tools
     import talk_transcript
@@ -1974,6 +1980,9 @@ async def run_talk_session(
         if policy.memory_review is False
         else talk_transcript.TranscriptCapture(hermes_home)
     )
+    # The delegation brief's call-context snapshot reads THIS capture and no
+    # other (hermes-sip-live-voice#53); detached with the session below.
+    talk_snapshot.attach_capture(capture)
     relay = RealtimeRelay(
         on_audio=audio.queue_playback,
         on_caption=on_caption,
@@ -2021,6 +2030,7 @@ async def run_talk_session(
         if authorization_ledger is not None:
             authorization_ledger.clear()
         audio.stop()
+        talk_snapshot.detach_capture()
         capture.finish()
         talk_transcript.sweep_transcripts(hermes_home)
         if host_execution_attachment is not None:
@@ -2039,6 +2049,7 @@ async def run_talk_session(
         if authorization_ledger is not None:
             authorization_ledger.clear()
         audio.stop()
+        talk_snapshot.detach_capture()
         capture.finish()
         talk_transcript.sweep_transcripts(hermes_home)
         if host_execution_attachment is not None:
@@ -2057,7 +2068,33 @@ async def run_talk_session(
                 if run_id in watched:
                     continue
                 watched.add(run_id)
+                if binding is not None:
+                    with suppress(Exception):
+                        run = talk_runs.get_run(run_id)
+                        binding.note_run(run_id, label=str((run or {}).get("label") or ""))
                 watchers.append(asyncio.create_task(watch_run(run_id)))
+
+        def _delivered(run_id: int) -> bool:
+            """The post-send flip, mirrored into the caller binding when there is one.
+
+            A lane with transport acknowledgments (``policy.delivery_evidence``)
+            flips only on evidence :func:`talk_delivery.is_delivered` accepts;
+            every other lane flips on send exactly as before 0.24.
+            """
+
+            evidence = policy.delivery_evidence
+            if evidence is not None:
+                try:
+                    if not talk_delivery.is_delivered(evidence(run_id)):
+                        return False
+                except Exception as exc:  # noqa: BLE001 — no evidence means no flip
+                    _log.debug("delivery evidence for run %s unavailable: %s", run_id, exc)
+                    return False
+            flipped = talk_runs.mark_delivered(run_id, claimant=talk_session_id)
+            if flipped and binding is not None:
+                with suppress(Exception):
+                    binding.mark_delivered(run_id)
+            return flipped
 
         async def send_outgoing(outgoing, *, is_announcement: bool = False) -> bool:
             """Serialize every provider write; keep multi-command batches contiguous.
@@ -2158,13 +2195,14 @@ async def run_talk_session(
                     # at the pump's post-send point, so a teardown while the
                     # batch is still queued leaves the result re-adoptable
                     # instead of consumed-but-unspoken.
+                    if binding is not None:
+                        with suppress(Exception):
+                            binding.note_result(run_id)
                     if talk_runs.claim_delivery(run_id, claimant=talk_session_id):
                         await announce_queue.put(
                             QueuedAnnouncement(
                                 run_finished_commands(run),
-                                lambda: talk_runs.mark_delivered(
-                                    run_id, claimant=talk_session_id
-                                ),
+                                lambda: _delivered(run_id),
                                 kind=talk_announce.KIND_COMPLETION,
                                 run_id=run_id,
                             )
@@ -2426,6 +2464,24 @@ async def run_talk_session(
             authorization_ledger.bind_session(talk_session_id)
         generation_id = uuid.uuid4().hex[:12]
         talk_profile = talk_config.agent_profile()
+        # The durable caller binding (hermes-sip-live-voice#35, I11). A lane
+        # that names a binding key attaches under the binding's durable Hermes
+        # session id — supplied, not guessed — so the adoption check below is
+        # SATISFIED rather than weakened, and the caller's exact pending
+        # results come back on the next call. No key: exactly the pre-0.24 path.
+        binding = None
+        if policy.binding_key:
+            try:
+                binding = talk_binding.for_caller(
+                    policy.binding_key,
+                    hermes_session_id=owner_session_id,
+                    after_call=policy.after_call,
+                )
+                binding.note_session(talk_session_id)
+                owner_session_id = binding.hermes_session_id
+            except Exception as exc:  # noqa: BLE001 — a binding failure never ends the call
+                _log.warning("talk caller binding unavailable: %s: %s", type(exc).__name__, exc)
+                binding = None
         talk_runs.attach_owner(
             talk_session_id=talk_session_id,
             generation_id=generation_id,
@@ -2433,6 +2489,11 @@ async def run_talk_session(
             operator=auth.source,
             profile=talk_profile,
         )
+        if binding is not None:
+            # Before adoption: a run that died with a previous gateway process
+            # is labelled interrupted in the binding, never "still running".
+            with suppress(Exception):
+                binding.pending_view()
         # The microphone pause (hermes-talk#100) binds the SAME way, before
         # any tool can run: the model's pause_voice_input and the operator's
         # key or command all flip this one surface. The registered resume
@@ -2466,9 +2527,7 @@ async def run_talk_session(
                 announce_queue.put_nowait(
                     QueuedAnnouncement(
                         commands,
-                        lambda rid=orphan_id: talk_runs.mark_delivered(
-                            rid, claimant=talk_session_id
-                        ),
+                        lambda rid=orphan_id: _delivered(rid),
                         kind=talk_announce.KIND_COMPLETION,
                         run_id=orphan_id,
                     )
@@ -2615,6 +2674,7 @@ async def run_talk_session(
             result = 1
         finally:
             audio.stop()
+            talk_snapshot.detach_capture()
             capture.finish()
             talk_transcript.sweep_transcripts(hermes_home)
             if host_execution_attachment is not None:

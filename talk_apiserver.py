@@ -841,6 +841,73 @@ def stop_run(run_id: str) -> None:
         )
 
 
+class SteerRefused(TalkApiServerError):
+    """The host answered 4xx: the run is not accepting steer input right now."""
+
+    def __init__(self, message: str, *, code: str | None = None, status: int = 409) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
+def steer_run(run_id: str, text: str) -> dict:
+    """POST /v1/runs/{id}/steer — queue guidance into a RUNNING api_server agent.
+
+    The host's contract (api_server_runs._handle_steer_run): 200 with
+    ``accepted: true`` means the text entered the agent's steer QUEUE — it
+    is read at the agent's next step, never applied on the spot; 409
+    (``run_not_accepting_steer`` / ``steer_not_accepted``) means the run is
+    not running or refused the text. Raises :class:`SteerRefused` for the
+    4xx family and :class:`TalkApiServerError` for transport/5xx.
+    """
+
+    try:
+        response = httpx.post(
+            f"{talk_config.api_server_url()}{RUNS_PATH}/{run_id}/steer",
+            headers=_auth_headers(),
+            json={"input": text},
+            timeout=talk_config.api_server_probe_timeout_s() * 4,
+        )
+    except httpx.HTTPError as exc:
+        raise TalkApiServerError(
+            f"I couldn't reach the Hermes api server ({type(exc).__name__})"
+        ) from exc
+    if response.status_code // 100 == 4:
+        code = None
+        with contextlib.suppress(Exception):
+            body = response.json()
+            error = body.get("error") if isinstance(body, dict) else None
+            code = error.get("code") if isinstance(error, dict) else None
+        raise SteerRefused(
+            f"the Hermes api server refused the steer ({response.status_code})",
+            code=code,
+            status=response.status_code,
+        )
+    if response.status_code // 100 != 2:
+        raise TalkApiServerError(
+            f"the Hermes api server failed the steer ({response.status_code})"
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise TalkApiServerError(
+            "the Hermes api server returned an unreadable steer receipt"
+        ) from exc
+    if not isinstance(payload, dict) or payload.get("accepted") is not True:
+        raise TalkApiServerError("the Hermes api server did not confirm the steer")
+    return payload
+
+
+def steering_supported() -> bool:
+    """Whether the host advertises ``run_steer`` in /v1/capabilities. False on any doubt."""
+
+    try:
+        features = capabilities_payload().get("features")
+    except Exception:  # noqa: BLE001 — unknown reads as unsupported
+        return False
+    return isinstance(features, dict) and features.get("run_steer") is True
+
+
 class ApprovalGoneError(TalkApiServerError):
     """The host answered 409: no pending approval remains to resolve.
 

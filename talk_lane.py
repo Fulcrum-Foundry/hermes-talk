@@ -60,6 +60,21 @@ class LanePolicy:
         caller can flip it per session with ``set_verbosity`` (#57).
     ``manifest``: free-form producer facts (what was included, omitted,
         truncated) for the diagnostics receipt. Never read by the model.
+    ``binding_key``: opaque durable-conversation key for this caller on this
+        deployment (hermes-sip-live-voice#35, I11; SIP passes a hash of
+        caller + deployment). With a key, the session attaches under the
+        binding's durable Hermes session id and adopts the caller's exact
+        pending results; ``None`` (default) binds nothing and behaves as
+        every release before 0.24.
+    ``after_call``: what happens to results that finish after the caller is
+        gone. ``"retrievable"`` (default) keeps them in the ledger and the
+        binding for the next call; ``"none"`` records nothing pending. No
+        external delivery is ever started by Talk.
+    ``delivery_evidence``: optional ``callable(run_id) -> dict`` a transport
+        with acknowledgments supplies (``acked``/``audible_ms``; see
+        :mod:`talk_delivery`). When set, a completion's post-send delivered
+        flip fires only if :func:`talk_delivery.is_delivered` accepts that
+        evidence; ``None`` (default) keeps the pre-0.24 flip-on-send.
     """
 
     name: str = "cli"
@@ -73,6 +88,9 @@ class LanePolicy:
     announcements: str = "immediate"
     verbosity: str | None = None
     manifest: dict[str, Any] = field(default_factory=dict)
+    binding_key: str | None = None
+    after_call: str = "retrievable"
+    delivery_evidence: Callable[[int], Any] | None = None
 
     def rendered_instructions(self) -> str | None:
         """The pack as it will be placed in the prompt: stripped, capped, marked when cut."""
@@ -104,6 +122,9 @@ class LanePolicy:
             "memory_review": self.memory_review,
             "announcements": self.announcements,
             "verbosity": self.verbosity,
+            "binding": bool(self.binding_key),
+            "after_call": self.after_call,
+            "delivery_evidence": self.delivery_evidence is not None,
             "tools": [t.get("name") for t in self.tools if isinstance(t, dict)],
             "manifest": dict(self.manifest),
         }

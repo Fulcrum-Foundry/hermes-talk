@@ -34,6 +34,7 @@ try:
         talk_approvals,
         talk_audio,
         talk_auth,
+        talk_brief,
         talk_capabilities,
         talk_config,
         talk_controls,
@@ -44,7 +45,9 @@ try:
         talk_pause,
         talk_results,
         talk_runs,
+        talk_snapshot,
         talk_steer,
+        talk_targets,
         talk_vault,
     )
 except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path load)
@@ -52,6 +55,7 @@ except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path
     import talk_approvals
     import talk_audio
     import talk_auth
+    import talk_brief
     import talk_capabilities
     import talk_config
     import talk_controls
@@ -62,7 +66,9 @@ except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path
     import talk_pause
     import talk_results
     import talk_runs
+    import talk_snapshot
     import talk_steer
+    import talk_targets
     import talk_vault
 
 _log = logging.getLogger(__name__)
@@ -193,6 +199,38 @@ _TOOL_DELEGATE_TASK: dict = {
                     "parallel_read_only. Omit when the task touches nothing shared."
                 ),
             },
+            "include_call_context": {
+                "type": "string",
+                "enum": ["none", "recent", "all"],
+                "description": (
+                    "How much of THIS call's transcript to quote into the brief, "
+                    "verbatim, as data. 'recent' (default): the last few turns. "
+                    "'all': every captured turn — use it when the operator asks to "
+                    "review, summarize or act on the whole call; never paraphrase the "
+                    "call yourself instead. 'none': the task is unrelated to what was "
+                    "said."
+                ),
+            },
+            "required_sources": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 8,
+                "description": (
+                    "Skills, connectors or knowledge sources the work MUST use (a "
+                    "brain, a mailbox connector, a named skill). The agent reports "
+                    "BLOCKED if one is unavailable instead of substituting a generic "
+                    "fallback, and names what it actually used."
+                ),
+            },
+            "target": {
+                "type": "string",
+                "description": (
+                    "The repository, plugin or project the task is about, exactly as "
+                    "the operator said it. It is resolved against what is installed "
+                    "here and the brief carries both the heard phrase and the match; "
+                    "if it is ambiguous you will be told what to ask."
+                ),
+            },
         },
         "required": ["task"],
         "additionalProperties": False,
@@ -245,16 +283,19 @@ _TOOL_STEER_AGENT: dict = {
         "the tests'. The note is QUEUED, not delivered: if the agent takes "
         "another step it sees the note then, and delivery is confirmed "
         "separately. Never "
-        "say the agent already has it. Only subagent ids (like "
-        "sa-0-a1b2c3d4, from list_agents) can be steered — run numbers "
-        "cannot; offer stop_work for those. This never cancels work."
+        "say the agent already has it. Takes a subagent id (like "
+        "sa-0-a1b2c3d4, from list_agents) or a run NUMBER from check_work: an "
+        "api-server run gets the note queued into the same job, or queued for "
+        "after its current step — the reply says which; say exactly that, "
+        "never 'applied'. Detached runs cannot be reached; offer stop_work. "
+        "This never cancels work."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "agent_id": {
                 "type": "string",
-                "description": ("The subagent id from list_agents. Not a run number."),
+                "description": ("The subagent id from list_agents, or a run number."),
             },
             "text": {
                 "type": "string",
@@ -278,16 +319,17 @@ _TOOL_REDIRECT_AGENT: dict = {
         "wrong repo', 'abandon that approach'). The agent keeps everything "
         "it already finished; only its in-flight thinking is dropped and "
         "retried with the correction. If it's mid-tool the correction lands "
-        "when the tool finishes. Only subagent ids (from list_agents) can "
-        "be redirected — run numbers cannot. This never cancels the work; "
-        "use stop_work for that."
+        "when the tool finishes. Takes a subagent id (from list_agents) or a "
+        "run NUMBER from check_work; for an api-server run the correction is "
+        "queued into the same job (or for after its current step) and the "
+        "reply says which. This never cancels the work; use stop_work for that."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "agent_id": {
                 "type": "string",
-                "description": ("The subagent id from list_agents. Not a run number."),
+                "description": ("The subagent id from list_agents, or a run number."),
             },
             "text": {
                 "type": "string",
@@ -691,8 +733,53 @@ def _handle_delegate_task(arguments: dict) -> str:
         keys = talk_runs.normalize_resource_keys(arguments.get("resource_keys"))
     except ValueError as exc:
         return f"delegate_task could not use those resource_keys: {exc}."
+    # The structured envelope (hermes-sip-live-voice#53/#54): the transcript is
+    # quoted as data inside a trust frame, the target is resolved with evidence,
+    # and required sources are mandatory for the worker. Defaults reproduce a
+    # plain brief when no snapshot is bound (the unavailable line, not a refusal).
+    sources = arguments.get("required_sources")
+    if sources is not None and (
+        not isinstance(sources, list) or not all(isinstance(s, str) for s in sources)
+    ):
+        return "delegate_task's required_sources must be a list of names."
+    context_arg = arguments.get("include_call_context")
+    target_arg = str(arguments.get("target") or "").strip() or None
+    envelope_requested = (
+        context_arg is not None
+        or bool(sources)
+        or target_arg is not None
+        or talk_snapshot.current_snapshot() is not None
+    )
+    if not envelope_requested:
+        # Nothing to envelope and no call capture bound: the plain brief, exactly
+        # as every release before 0.24 handed it over.
+        return talk_host.host().run_agent(
+            task, background is not False, execution_mode=mode, resource_keys=keys
+        )
+    try:
+        brief = talk_brief.build(
+            task,
+            include_call_context=str(context_arg or "recent"),
+            required_sources=sources,
+            target=target_arg,
+        )
+    except ValueError as exc:
+        return f"delegate_task could not build the brief: {exc}."
+    if brief.target is not None and brief.target.get("resolved") is None:
+        resolution = talk_targets.Resolution(**brief.target)
+        question = resolution.question()
+        if question:
+            return f"I can't tell which target you mean. {question}"
+        return (
+            f"I don't know a project called {brief.target.get('heard')!r} on this install — "
+            "ask the operator for the exact name or path before delegating."
+        )
     return talk_host.host().run_agent(
-        task, background is not False, execution_mode=mode, resource_keys=keys
+        brief.render(),
+        background is not False,
+        execution_mode=mode,
+        resource_keys=keys,
+        brief=brief,
     )
 
 

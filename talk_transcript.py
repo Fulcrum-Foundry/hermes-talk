@@ -14,7 +14,9 @@ import os
 import re
 import stat
 import threading
+import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -22,6 +24,8 @@ from pathlib import Path
 _log = logging.getLogger(__name__)
 MIN_TURNS = 2
 MIN_CHARS = 200
+#: Finalized turns kept in memory per capture for same-session snapshots.
+RING_MAX_TURNS = 2_000
 _ACTIVE_TRANSCRIPTS: set[Path] = set()
 _ACTIVE_LOCK = threading.RLock()
 _HANDOFF_STATUS: dict[str, str] = {"state": "unknown"}
@@ -228,8 +232,42 @@ class TranscriptCapture:
         self.path = self._root / f"{uuid.uuid4().hex}.jsonl"
         self._finished = False
         self._lease: _Lease | None = None
+        #: Local, capture-scoped identity for snapshot handles (talk_snapshot).
+        #: Minted here, never derived from a remote id, so a handle can only
+        #: ever name the capture that minted it.
+        self.snapshot_session_id = uuid.uuid4().hex
+        #: In-memory ring of finalized turns with ids and timestamps. The file
+        #: above stays the durable copy; this is what a same-session snapshot
+        #: reads (hermes-sip-live-voice#53). Bounded: an overflow is reported
+        #: by :meth:`turns_dropped`, never silently.
+        self._ring: deque[dict] = deque(maxlen=RING_MAX_TURNS)
+        self._turn_seq = 0
+        self._dropped = 0
         with _ACTIVE_LOCK:
             _ACTIVE_TRANSCRIPTS.add(self.path)
+
+    def turns(self) -> list[dict]:
+        """Copy of the finalized turns still in the ring (oldest first)."""
+
+        with _ACTIVE_LOCK:
+            return [dict(turn) for turn in self._ring]
+
+    @property
+    def turns_dropped(self) -> int:
+        """How many finalized turns fell off the ring (0 = the ring is complete)."""
+
+        with _ACTIVE_LOCK:
+            return self._dropped
+
+    def _ring_append(self, role: str, text: str) -> None:
+        """Ring write under the same lock as the file write; never raises."""
+
+        self._turn_seq += 1
+        if len(self._ring) == self._ring.maxlen:
+            self._dropped += 1
+        self._ring.append(
+            {"id": f"t-{self._turn_seq:06d}", "role": role, "text": text, "ts": time.time()}
+        )
 
     def append_turn(self, role: str, text: str) -> None:
         """Write and close one row so a force-kill loses no completed turns."""
@@ -247,6 +285,7 @@ class TranscriptCapture:
             if self._finished:
                 _log.warning("Talk transcript turn arrived after capture finished and was dropped")
                 return
+            self._ring_append(role, text)
             try:
                 if _safe_root(self._home, self._root) is None:
                     _log.warning("unsafe Talk transcript root was refused: %s", self._root)
