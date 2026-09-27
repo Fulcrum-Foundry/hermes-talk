@@ -1258,4 +1258,5 @@ def test_free_text_arguments_are_outside_the_cross_check_by_design(monkeypatch):
         "steer_agent",
         "redirect_agent",
         "stop_work",
+        "cancel_job",
     }

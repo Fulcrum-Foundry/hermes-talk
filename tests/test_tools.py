@@ -69,6 +69,12 @@ _BASE_TOOLS = [
     "resolve_approval",
     "talk_status",
     "talk_capabilities",
+    "hold",
+    "resume",
+    "cancel_job",
+    "set_verbosity",
+    "defer_updates",
+    "get_result",
 ]
 
 

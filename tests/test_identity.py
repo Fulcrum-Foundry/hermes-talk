@@ -48,13 +48,54 @@ def test_preamble_states_the_load_bearing_rules():
 
 def test_preamble_collapses_repeated_confirmation_into_one_approval():
     """The permit binds what was approved; the preamble is what stops the model
-    re-asking for it. Without this the operator confirms the same action twice.
+    re-asking for it. Without this the operator confirms the same action twice
+    (hermes-sip-live-voice#52: one policy table, consumed once, new scope = new grant).
     """
 
     text = talk_identity.VOICE_PREAMBLE
-    assert "say the plan once" in text
-    assert "do not restate the plan or ask a second time" in text
-    assert "summarize the new version and ask again" in text
+    assert talk_identity.CONSENT_POLICY in text
+    assert "Permission policy, in full" in text
+    assert "No confirmation, no 'do you approve', no special phrase" in text
+    assert "ask once" in text
+    assert "An approval is consumed by the action it named" in text
+    assert "changed arguments is a new request that needs its own grant" in text
+
+
+def test_preamble_has_exactly_one_consent_rule_and_no_contradiction():
+    """The 0.21 preamble told the model to offer delegation 'and ask' whenever
+    voice lacked a tool — contradicting the rule that requested delegation
+    needs no confirmation, and producing "do you approve once?" for read-only
+    triage (hermes-sip-live-voice#52). The sentence is gone; the table is the
+    only rule; no magic phrase is demanded."""
+
+    text = talk_identity.VOICE_PREAMBLE
+    assert "hand it to an agent that can, and ask" not in text
+    assert "hand it to an agent that can" in text
+    assert "needs no further confirmation" in text
+    assert "approve once" not in text.lower()
+    # One table: the read/search/draft/delegate row and the consequential row.
+    assert "(1) Requested read, search, draft and delegate actions" in text
+    assert "(2) Consequential actions" in text
+    assert "(3) An approval is consumed" in text
+    assert text.count("Permission policy, in full") == 1
+    # The old two-paragraph version is not lurking beside the table.
+    assert "say the plan once" not in text
+    assert "then STOP and ask before it fires" not in text
+
+
+def test_preamble_separates_stop_hold_topic_cancel_and_end_call():
+    """hermes-sip-live-voice#57: an ambiguous 'stop' must never cancel a job."""
+
+    text = talk_identity.VOICE_PREAMBLE
+    assert talk_identity.CONTROL_POLICY in text
+    assert "means stop talking" in text
+    assert "do not cancel anything" in text
+    assert "call hold once" in text
+    assert "cancel_job" in text
+    assert "never cancels authorized background work" in text
+    assert "set_verbosity" in text
+    assert "never how complete a requested report is" in text
+    assert "get_result" in text
 
 
 def test_legacy_capability_claims_are_derived_from_the_advertised_tool_schemas():
