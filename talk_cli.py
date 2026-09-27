@@ -2093,19 +2093,26 @@ async def run_talk_session(
         def _delivered(run_id: int) -> bool:
             """The post-send flip, mirrored into the caller binding when there is one.
 
-            A lane with transport acknowledgments (``policy.delivery_evidence``)
-            flips only on evidence :func:`talk_delivery.is_delivered` accepts;
-            every other lane flips on send exactly as before 0.24.
+            The flip happens ON SEND, exactly-once, on every lane. A lane with
+            transport acknowledgments (``policy.delivery_evidence``) additionally
+            snapshots what the transport had acknowledged at that moment onto the
+            run (``meta.delivery``), for receipts and ``check_work``. Evidence
+            never GATES the flip: at send time nothing has been acknowledged
+            yet, so a gate would leave every spoken result "undelivered" and
+            re-adopt it on the next call (seen in a live simulator: the same
+            weather result offered on five consecutive calls).
             """
 
             evidence = policy.delivery_evidence
             if evidence is not None:
                 try:
-                    if not talk_delivery.is_delivered(evidence(run_id)):
-                        return False
-                except Exception as exc:  # noqa: BLE001 — no evidence means no flip
+                    snapshot = evidence(run_id)
+                    if isinstance(snapshot, dict):
+                        talk_runs.annotate_run(
+                            run_id, delivery=talk_delivery.stage(dict(snapshot, injected=True))
+                        )
+                except Exception as exc:  # noqa: BLE001 — a receipt, never the flip
                     _log.debug("delivery evidence for run %s unavailable: %s", run_id, exc)
-                    return False
             flipped = talk_runs.mark_delivered(run_id, claimant=talk_session_id)
             if flipped and binding is not None:
                 with suppress(Exception):

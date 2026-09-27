@@ -72,9 +72,10 @@ class LanePolicy:
         external delivery is ever started by Talk.
     ``delivery_evidence``: optional ``callable(run_id) -> dict`` a transport
         with acknowledgments supplies (``acked``/``audible_ms``; see
-        :mod:`talk_delivery`). When set, a completion's post-send delivered
-        flip fires only if :func:`talk_delivery.is_delivered` accepts that
-        evidence; ``None`` (default) keeps the pre-0.24 flip-on-send.
+        :mod:`talk_delivery`). When set, the transport's acknowledged state at
+        send time is recorded on the run as ``meta.delivery`` (a receipt for
+        ``check_work`` and the ledger). It never gates the exactly-once
+        delivered flip, which happens on send on every lane.
     """
 
     name: str = "cli"

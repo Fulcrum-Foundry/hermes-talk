@@ -27,6 +27,11 @@ named rather than smoothed.
 - A detached child that `stop_work`/`cancel_job` terminated is recorded and
   spoken as CANCELLED, not failed ("exited -15"). Found in a live simulator
   call.
+- `LanePolicy.delivery_evidence` is a receipt, not a gate: the acknowledged
+  state at send time is recorded as ``meta.delivery``; the exactly-once
+  delivered flip happens on send as before. Gating on acks (which are always
+  zero at send time) left every spoken result undelivered and re-offered it
+  on each later call. Found in a live simulator call.
 
 ## [0.24.0] — 2026-09-27
 

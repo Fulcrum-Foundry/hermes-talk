@@ -389,3 +389,17 @@ def test_a_detached_child_killed_by_stop_work_is_cancelled_not_failed(monkeypatc
     assert "operator's request" in run["output"]
     assert "was cancelled" in _spoken(run)
 
+
+def test_delivery_evidence_is_a_receipt_not_a_gate():
+    """Live sim: gating the flip on acks left every result 'undelivered' and re-adopted
+    on the next call. Evidence rides the run meta; the flip still happens on send."""
+
+    import talk_delivery
+
+    snapshot = {"audible_ms": 0, "acknowledged": False, "dequeued_ms": 480}
+    assert talk_delivery.stage(dict(snapshot, injected=True)) == talk_delivery.INJECTED
+    assert not talk_delivery.is_delivered(snapshot)
+    acked = {"audible_ms": 480, "acknowledged": True, "ms": 480}
+    assert talk_delivery.is_delivered(acked)
+    assert talk_delivery.stage(acked) == talk_delivery.DELIVERED
+
