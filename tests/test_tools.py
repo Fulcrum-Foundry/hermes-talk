@@ -478,7 +478,7 @@ def test_check_work_lists_a_finished_run():
     _wait_terminal(run_id)
 
     result = talk_tools.execute_talk_tool("check_work", {})
-    assert f"run {run_id} (agent) done" in result
+    assert f"run {run_id} (agent) finished" in result  # the outcome, not the lifecycle word
     assert f"check_work with run_id {run_id}" in result
     assert "the index is rebuilt" not in result
 

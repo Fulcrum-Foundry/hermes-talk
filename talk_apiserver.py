@@ -73,7 +73,29 @@ TOOLSETS_PATH = "/v1/toolsets"
 HEALTH_DETAILED_PATH = "/health/detailed"
 
 #: api_server run statuses that will never change again (api_server.py:4377-4404).
-TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+#: ``interrupted`` is stamped by the host when the gateway shuts a live run
+#: down (api_server_runs._finish); it is terminal and NOT a success.
+TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+#: Statuses the host uses while a run is still alive. Anything outside this
+#: set AND outside :data:`TERMINAL_RUN_STATUSES` is a status this Talk does
+#: not know; it is treated as terminal-unknown rather than polled forever
+#: (hermes-sip-live-voice#49), and it can never be announced as success.
+LIVE_RUN_STATUSES = frozenset({"queued", "running", "waiting_for_approval", "stopping"})
+
+#: Outcome categories: what the caller may truthfully SAY about the run.
+OUTCOME_SUCCESS = "success"
+OUTCOME_FAILED = "failed"
+OUTCOME_CANCELLED = "cancelled"
+OUTCOME_INTERRUPTED = "interrupted"
+OUTCOME_TIMEOUT = "timeout"
+OUTCOME_UNKNOWN = "unknown"
+OUTCOME_INCOMPLETE = "incomplete"  # host turn ended, delegated children still running
+_REMOTE_TO_OUTCOME = {
+    "completed": OUTCOME_SUCCESS,
+    "failed": OUTCOME_FAILED,
+    "cancelled": OUTCOME_CANCELLED,
+    "interrupted": OUTCOME_INTERRUPTED,
+}
 
 #: Why the lane is unusable, in the words the model should say.
 REASON_OK = "ok"
@@ -454,15 +476,85 @@ def health_detailed() -> dict:
     return payload
 
 
-def run_to_completion(
+@dataclass(frozen=True, slots=True)
+class RunOutcome:
+    """What ONE api_server run actually came to (hermes-sip-live-voice#49).
+
+    ``outcome`` is the category the caller may speak from; ``remote_status``
+    is the host's own last word, kept verbatim so a status this Talk does not
+    understand is visible rather than laundered into a category. ``output``
+    is the text the host returned (clipped), present for success AND for a
+    partial result on a failed/cancelled run. ``error`` is the host's reason
+    when it gave one. ``children_started``/``children_finished`` count the
+    ``subagent.start``/``subagent.complete`` events seen on the run's own
+    stream; when the first exceeds the second at the host's ``completed``,
+    the host turn ended with delegated work still running and the outcome is
+    :data:`OUTCOME_INCOMPLETE`, not success (hermes-sip-live-voice#50).
+    """
+
+    outcome: str
+    remote_status: str
+    output: str
+    error: str
+    api_run_id: str
+    session_id: str
+    children_started: int = 0
+    children_finished: int = 0
+
+    @property
+    def succeeded(self) -> bool:
+        return self.outcome == OUTCOME_SUCCESS
+
+    @property
+    def children_outstanding(self) -> int:
+        return max(0, self.children_started - self.children_finished)
+
+    def speakable(self) -> str:
+        """The one sentence a worker may return when it is asked for text."""
+
+        if self.outcome == OUTCOME_SUCCESS:
+            return self.output or "the agent finished without saying anything"
+        if self.outcome == OUTCOME_INCOMPLETE:
+            head = self.output or "the agent's turn ended"
+            why = self.error or (
+                f"{self.children_outstanding} delegated task(s) are still running; "
+                "the final result is not in yet"
+            )
+            return f"{head} — {why}"
+        detail = self.error or "no reason given"
+        if self.outcome == OUTCOME_TIMEOUT:
+            return (
+                "the agent run is still going after its whole time budget — "
+                "it may still finish, but I stopped waiting"
+            )
+        if self.outcome == OUTCOME_UNKNOWN:
+            return (
+                f"the agent run ended in a state I don't recognize ({self.remote_status}): {detail}"
+            )
+        return f"the agent run {self.remote_status}: {detail}"
+
+
+def _outcome_for(remote_status: str) -> str:
+    return _REMOTE_TO_OUTCOME.get(remote_status, OUTCOME_UNKNOWN)
+
+
+def _clip(text: Any) -> str:
+    if text is None:
+        return ""
+    s = text if isinstance(text, str) else json.dumps(text, default=str)
+    return s.strip()[:MAX_OUTPUT_CHARS]
+
+
+def run_to_outcome(
     prompt: str,
     *,
     session_id: str | None = None,
     session_key: str | None = None,
     on_start=None,
     on_event=None,
-) -> str:
-    """Run one agent turn and return its answer as speakable text.
+    child_counter=None,
+) -> RunOutcome:
+    """Run one agent turn and return a typed :class:`RunOutcome`.
 
     BLOCKS until the run terminates or the budget expires, so this belongs on
     a :mod:`talk_runs` worker thread and nowhere else. The deadline is the
@@ -475,6 +567,16 @@ def run_to_completion(
     ``on_start``, it is pure telemetry: suppressed on error, never consulted
     for the answer, and never evidence the run finished. The payload arrives
     BEFORE the terminal branch, so the terminal ``last_event`` is seen too.
+
+    ``child_counter`` is an optional zero-arg callable returning
+    ``(started, finished)`` subagent counts observed on the run's own event
+    stream (the approval sidecar reads it). It is consulted once, at the
+    host's terminal status, to tell a genuinely finished turn from one that
+    merely returned while its children were still working.
+
+    Never raises for a run the host reported on; a run this Talk stopped
+    waiting for is :data:`OUTCOME_TIMEOUT`. Transport failures still raise
+    :class:`TalkApiServerError`.
     """
 
     run_id = start_run(prompt, session_id=session_id, session_key=session_key)
@@ -483,6 +585,7 @@ def run_to_completion(
             on_start(run_id)
     poll = talk_config.api_server_poll_s()
     deadline = time.monotonic() + talk_config.agent_timeout_s()
+    run: dict = {}
     while time.monotonic() < deadline:
         time.sleep(poll)
         run = get_run(run_id)
@@ -492,21 +595,226 @@ def run_to_completion(
             except Exception:  # noqa: BLE001 — telemetry, never the run's fate
                 _log.debug("on_event progress tap failed", exc_info=True)
         state = str(run.get("status") or "")
-        if state not in TERMINAL_RUN_STATUSES:
+        if state in LIVE_RUN_STATUSES:
             continue
-        if state == "completed":
-            output = run.get("output")
-            text = output if isinstance(output, str) else json.dumps(output, default=str)
-            return (text.strip() or "the agent finished without saying anything")[
-                :MAX_OUTPUT_CHARS
-            ]
-        error = run.get("error")
-        detail = str(error) if error else "no reason given"
-        return f"the agent run {state}: {detail}"[:MAX_OUTPUT_CHARS]
-    raise TalkApiServerError(
-        "the agent run is still going after its whole time budget — it may "
-        "still finish, but I stopped waiting"
+        if state not in TERMINAL_RUN_STATUSES:
+            _log.warning(
+                "api run %s reported an unknown status %r; not waiting further", run_id, state
+            )
+        started = finished = 0
+        if child_counter is not None:
+            with contextlib.suppress(Exception):
+                started, finished = child_counter()
+        outcome = _outcome_for(state)
+        if outcome == OUTCOME_SUCCESS and started > finished:
+            outcome = OUTCOME_INCOMPLETE
+        return RunOutcome(
+            outcome=outcome,
+            remote_status=state,
+            output=_clip(run.get("output")),
+            error=_clip(run.get("error")),
+            api_run_id=str(run_id),
+            session_id=str(run.get("session_id") or session_id or ""),
+            children_started=started,
+            children_finished=finished,
+        )
+    return RunOutcome(
+        outcome=OUTCOME_TIMEOUT,
+        remote_status=str(run.get("status") or "running"),
+        output=_clip(run.get("output")),
+        error="time budget exhausted while the run was still live",
+        api_run_id=str(run_id),
+        session_id=str(run.get("session_id") or session_id or ""),
     )
+
+
+def run_to_completion(
+    prompt: str,
+    *,
+    session_id: str | None = None,
+    session_key: str | None = None,
+    on_start=None,
+    on_event=None,
+) -> str:
+    """String-returning wrapper over :func:`run_to_outcome`.
+
+    Kept for callers that only need speakable text (the transcript memory
+    flush). Its documented failure shapes are unchanged: failed/cancelled
+    runs return text starting ``"the agent run "``; a timeout raises
+    :class:`TalkApiServerError`. New code should call :func:`run_to_outcome`
+    and branch on ``outcome`` instead of parsing prose.
+    """
+
+    result = run_to_outcome(
+        prompt, session_id=session_id, session_key=session_key, on_start=on_start, on_event=on_event
+    )
+    if result.outcome == OUTCOME_TIMEOUT:
+        raise TalkApiServerError(result.speakable())
+    return result.speakable()[:MAX_OUTPUT_CHARS]
+
+
+_ORIGINAL_RUN_TO_COMPLETION = run_to_completion
+_LEGACY_TEXT_PREFIX = "the agent run "
+
+
+def outcome_from_text(text: str, *, api_run_id: str = "", session_id: str = "") -> RunOutcome:
+    """Classify a legacy string from :func:`run_to_completion` into a RunOutcome.
+
+    The string contract had exactly one failure shape, ``"the agent run
+    <status>: <detail>"``; anything else was the answer. This is the ONLY
+    place that prose is parsed, and it exists so a caller (or a test double)
+    that still speaks the string contract cannot make a cancelled or failed
+    run read as success.
+    """
+
+    text = (text or "").strip()
+    if text.startswith(_LEGACY_TEXT_PREFIX):
+        rest = text[len(_LEGACY_TEXT_PREFIX) :]
+        status, _, detail = rest.partition(":")
+        status = status.strip()
+        outcome = _outcome_for(status) if status in TERMINAL_RUN_STATUSES else OUTCOME_UNKNOWN
+        if outcome == OUTCOME_SUCCESS:
+            outcome = OUTCOME_UNKNOWN  # "the agent run completed: ..." was never emitted
+        return RunOutcome(
+            outcome=outcome,
+            remote_status=status or "unknown",
+            output="",
+            error=detail.strip() or "no reason given",
+            api_run_id=api_run_id,
+            session_id=session_id,
+        )
+    return RunOutcome(
+        outcome=OUTCOME_SUCCESS,
+        remote_status="completed",
+        output=text[:MAX_OUTPUT_CHARS],
+        error="",
+        api_run_id=api_run_id,
+        session_id=session_id,
+    )
+
+
+def run_for_worker(
+    prompt: str,
+    *,
+    session_id: str | None = None,
+    session_key: str | None = None,
+    on_start=None,
+    on_event=None,
+    child_counter=None,
+) -> RunOutcome:
+    """The worker's entry point: typed in production, tolerant of a swapped string seam.
+
+    If something replaced :func:`run_to_completion` on this module (the
+    suite's fakes do; a downstream fork might), that replacement is the
+    lane's authority and its string is classified through
+    :func:`outcome_from_text`. Otherwise the typed poll runs directly.
+    """
+
+    if run_to_completion is not _ORIGINAL_RUN_TO_COMPLETION:
+        remote: dict[str, str] = {}
+
+        def _capture(api_run_id: str) -> None:
+            remote["id"] = str(api_run_id)
+            if on_start is not None:
+                on_start(api_run_id)
+
+        text = run_to_completion(
+            prompt,
+            session_id=session_id,
+            session_key=session_key,
+            on_start=_capture,
+            on_event=on_event,
+        )
+        started = finished = 0
+        if child_counter is not None:
+            with contextlib.suppress(Exception):
+                started, finished = child_counter()
+        result = outcome_from_text(
+            text, api_run_id=remote.get("id", ""), session_id=session_id or ""
+        )
+        if result.succeeded and started > finished:
+            result = RunOutcome(
+                outcome=OUTCOME_INCOMPLETE,
+                remote_status=result.remote_status,
+                output=result.output,
+                error="",
+                api_run_id=result.api_run_id,
+                session_id=result.session_id,
+                children_started=started,
+                children_finished=finished,
+            )
+        return result
+    return run_to_outcome(
+        prompt,
+        session_id=session_id,
+        session_key=session_key,
+        on_start=on_start,
+        on_event=on_event,
+        child_counter=child_counter,
+    )
+
+
+SESSIONS_PATH = "/api/sessions"
+#: The host's row kind for a detached child result parked on an api_server
+#: session between client turns (gateway/wake.py ``persist_delegation_delivery``).
+DELEGATION_DELIVERY_KIND = "async_delegation_complete"
+
+
+def session_messages(session_id: str, *, limit: int = 50) -> list[dict]:
+    """``GET /api/sessions/{id}/messages`` — the newest ``limit`` rows, oldest first.
+
+    Read-only. Raises :class:`TalkApiServerError` on any failure. Used to
+    see whether the host has parked a delegated child's result on the
+    session after the parent run returned (hermes-sip-live-voice#50); the
+    row's ``display_kind`` is :data:`DELEGATION_DELIVERY_KIND`.
+    """
+
+    try:
+        response = httpx.get(
+            f"{talk_config.api_server_url()}{SESSIONS_PATH}/{session_id}/messages",
+            params={"limit": str(limit), "order": "latest"},
+            headers=_auth_headers(),
+            timeout=talk_config.api_server_probe_timeout_s() * 4,
+        )
+    except httpx.HTTPError as exc:
+        raise TalkApiServerError(
+            f"I lost contact with the Hermes api server ({type(exc).__name__})"
+        ) from exc
+    if response.status_code != 200:
+        raise TalkApiServerError(
+            f"the Hermes api server refused the session read ({response.status_code})"
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise TalkApiServerError("the Hermes api server returned non-JSON messages") from exc
+    data = payload.get("data") if isinstance(payload, dict) else None
+    return [m for m in data if isinstance(m, dict)] if isinstance(data, list) else []
+
+
+def pending_child_deliveries(session_id: str, *, after_message_id: int | None = None) -> list[dict]:
+    """Delivery rows parked on ``session_id`` newer than ``after_message_id``.
+
+    Each row is a child result the host has stored for the NEXT run on this
+    session to read; none has been synthesized into an answer yet. Empty list
+    when nothing is parked. Raises on transport failure.
+    """
+
+    rows = []
+    for m in session_messages(session_id):
+        if m.get("display_kind") != DELEGATION_DELIVERY_KIND:
+            continue
+        mid = m.get("id")
+        if after_message_id is not None and isinstance(mid, int) and mid <= after_message_id:
+            continue
+        rows.append(m)
+    return rows
+
+
+def latest_message_id(session_id: str) -> int | None:
+    rows = session_messages(session_id, limit=1)
+    mid = rows[-1].get("id") if rows else None
+    return mid if isinstance(mid, int) else None
 
 
 def stop_run(run_id: str) -> None:
@@ -674,31 +982,48 @@ def reset_for_tests() -> None:
 __all__ = [
     "CAPABILITIES_PATH",
     "CHECKING_DETAIL",
+    "DELEGATION_DELIVERY_KIND",
     "HEALTH_DETAILED_PATH",
     "INERT_DETAIL",
+    "LIVE_RUN_STATUSES",
     "MAX_OUTPUT_CHARS",
+    "OUTCOME_CANCELLED",
+    "OUTCOME_FAILED",
+    "OUTCOME_INCOMPLETE",
+    "OUTCOME_INTERRUPTED",
+    "OUTCOME_SUCCESS",
+    "OUTCOME_TIMEOUT",
+    "OUTCOME_UNKNOWN",
     "REASON_ABSENT",
     "REASON_ERROR",
     "REASON_OK",
     "REASON_UNAUTHORIZED",
     "RUNS_PATH",
+    "SESSIONS_PATH",
     "SKILLS_PATH",
     "SSE_READ_IDLE_S",
     "TERMINAL_RUN_STATUSES",
     "TOOLSETS_PATH",
     "ApiServerStatus",
     "ApprovalGoneError",
+    "RunOutcome",
     "TalkApiServerError",
     "capabilities_payload",
     "get_run",
     "health_detailed",
     "is_available",
+    "latest_message_id",
     "list_skills",
     "list_toolsets",
+    "outcome_from_text",
+    "pending_child_deliveries",
     "probe",
     "reset_for_tests",
     "respond_to_approval",
+    "run_for_worker",
     "run_to_completion",
+    "run_to_outcome",
+    "session_messages",
     "start_run",
     "status",
     "stop_run",

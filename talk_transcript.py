@@ -77,9 +77,20 @@ def reset_status_for_tests() -> None:
         _HANDOFF_STATUS["state"] = "unknown"
 
 
+#: Root for transcripts a lane asked to KEEP but not hand to the durable-memory
+#: review (hermes-sip-live-voice#35: retention and promotion are separate
+#: controls). The sweep never scans it; the file simply stays for the operator.
+RETAINED_DIRNAME = "talk-transcripts-retained"
+
+
 def _roots(hermes_home: Path) -> tuple[Path, Path]:
     home = Path(hermes_home).expanduser().resolve()
     return home, home / "state" / "talk-transcripts"
+
+
+def _retained_roots(hermes_home: Path) -> tuple[Path, Path]:
+    home = Path(hermes_home).expanduser().resolve()
+    return home, home / "state" / RETAINED_DIRNAME
 
 
 def _safe_root(home: Path, root: Path) -> Path | None:
@@ -200,11 +211,20 @@ def _open_verified_regular(path: Path) -> int:
 
 
 class TranscriptCapture:
-    """Append completed voice turns to one session-unique JSONL file."""
+    """Append completed voice turns to one session-unique JSONL file.
 
-    def __init__(self, hermes_home: Path, *, session_id: str | None = None) -> None:
+    ``memory_review=False`` writes to the retained root instead: the turns
+    are still captured durably, but the post-call sweep never claims the
+    file for durable-memory extraction. Retention and promotion are
+    independent decisions (hermes-sip-live-voice#35).
+    """
+
+    def __init__(
+        self, hermes_home: Path, *, session_id: str | None = None, memory_review: bool = True
+    ) -> None:
         del session_id  # Remote identifiers never participate in local paths.
-        self._home, self._root = _roots(hermes_home)
+        self.memory_review = bool(memory_review)
+        self._home, self._root = (_roots if self.memory_review else _retained_roots)(hermes_home)
         self.path = self._root / f"{uuid.uuid4().hex}.jsonl"
         self._finished = False
         self._lease: _Lease | None = None

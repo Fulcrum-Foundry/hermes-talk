@@ -97,6 +97,32 @@ _WATCHERS: set[int] = set()
 #: emits no SSE event for it), so without this stamp a dead approval would
 #: re-prompt on every poll forever.
 _RECONCILED: set[int] = set()
+#: run_id → [subagent.start count, subagent.complete count] observed on the
+#: run's own SSE stream (hermes-sip-live-voice#50). The host forwards both
+#: lifecycle boundaries for every child a run spawns (api_server_runs.py
+#: ``_callback``), so ``start > complete`` at the run's terminal status is
+#: direct evidence that the turn ended with delegated work still running.
+#: Kept per run, never inferred from prose.
+_CHILDREN: dict[int, list[int]] = {}
+
+
+def children_seen(run_id: int) -> tuple[int, int]:
+    """``(started, finished)`` subagent counts for one run. ``(0, 0)`` when unknown."""
+
+    with _LOCK:
+        counts = _CHILDREN.get(run_id)
+        return (counts[0], counts[1]) if counts else (0, 0)
+
+
+def _note_child(run_id: int, kind: str) -> None:
+    with _LOCK:
+        counts = _CHILDREN.setdefault(run_id, [0, 0])
+        counts[0 if kind == "subagent.start" else 1] += 1
+
+
+def forget_children(run_id: int) -> None:
+    with _LOCK:
+        _CHILDREN.pop(run_id, None)
 
 
 @dataclass(slots=True)
@@ -598,13 +624,16 @@ def _note_event(
     if not isinstance(event, dict):
         return
     kind = event.get("event")
+    if kind in ("subagent.start", "subagent.complete"):
+        _note_child(run_id, kind)
+        return
     if kind == "approval.request":
         _register(run_id, api_run_id, event)
     elif kind == "approval.responded":
         # Resolved — by this bridge or by any other client. Either way the
         # pending record and its deny timer are done.
         _clear(run_id)
-    elif kind in ("run.completed", "run.failed", "run.cancelled"):
+    elif kind in ("run.completed", "run.failed", "run.cancelled", "run.interrupted"):
         # The run is over; a parked approval is moot. No deny POST — there is
         # nothing left to unblock, and the host has already moved on.
         _clear(run_id)
@@ -700,6 +729,7 @@ def reset_for_tests() -> None:
     with _LOCK:
         _WATCHERS.clear()
         _RECONCILED.clear()
+        _CHILDREN.clear()
 
 
 __all__ = [
@@ -708,8 +738,10 @@ __all__ = [
     "GRANTABLE_BY_VOICE",
     "RESOLVE_CONFIRM_WAIT_S",
     "attach_session",
+    "children_seen",
     "current_generation",
     "detach_session",
+    "forget_children",
     "has_pending",
     "note_barge_in",
     "note_prompt_sent",

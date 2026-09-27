@@ -111,6 +111,7 @@ _API_EVENT_PHASES = {
     "run.completed": PHASE_COMPLETE,
     "run.failed": PHASE_FAILED,
     "run.cancelled": PHASE_STOPPED,
+    "run.interrupted": PHASE_STOPPED,
 }
 
 
