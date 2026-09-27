@@ -118,7 +118,9 @@ def test_tool_layer_requires_agent_id_and_text():
 # -- run numbers: lanes that cannot steer -------------------------------------
 
 
-def test_api_server_run_refuses_and_offers_a_real_stop():
+def test_api_server_run_without_a_remote_id_yet_refuses_and_offers_a_real_stop():
+    # Once the remote id lands the run is steerable (tests/test_api_steer.py);
+    # before that there is no channel and the stop offer is the honest answer.
     run_id, hung = _running_run(talk_host.LANE_API_SERVER)
     try:
         out = talk_host.host().steer_agent(str(run_id), "focus on pricing")

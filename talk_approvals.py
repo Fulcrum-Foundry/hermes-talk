@@ -35,9 +35,12 @@ with ``loop.call_soon_threadsafe``, and every entry point is fail-open.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -104,6 +107,93 @@ _RECONCILED: set[int] = set()
 #: direct evidence that the turn ended with delegated work still running.
 #: Kept per run, never inferred from prose.
 _CHILDREN: dict[int, list[int]] = {}
+#: In-session approval ledger (hermes-sip-live-voice#52, I04): every request
+#: this session saw, with its identity (action + args hash), whether it was
+#: read-only, and the outcome. A read-only request whose identical twin was
+#: already granted in this session is auto-resolved at registration instead
+#: of re-prompting the operator. Cleared with the session.
+_REQUESTED: list[dict] = []
+_MAX_REQUESTED = 64
+
+
+def request_identity(request: dict) -> tuple[str, str]:
+    """(action, args_hash) for one request dict, from whichever keys it carries.
+
+    Replay-suite dicts carry ``action``/``args_hash`` directly; host
+    approval events carry ``description`` (the action class) and ``command``
+    or ``args`` (the exact arguments). The hash is over the canonical JSON
+    of the arguments, so reordered keys still match and any changed argument
+    does not.
+    """
+
+    action = request.get("action") or request.get("description") or request.get("pattern_key")
+    action = str(action or "").strip()
+    args_hash = request.get("args_hash")
+    if not isinstance(args_hash, str) or not args_hash:
+        args = request.get("args")
+        if args is None:
+            args = request.get("command")
+        if args is None:
+            args = ""
+        canonical = json.dumps(args, sort_keys=True, ensure_ascii=True, default=str)
+        args_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+    return action, args_hash
+
+
+def _read_only(request: dict) -> bool:
+    return request.get("read_only") is True
+
+
+def already_requested(previous: list[dict], request: dict) -> bool:
+    """True when a READ-ONLY ``request`` duplicates one already in ``previous``.
+
+    Same action, same argument hash, and both read-only. A consequential
+    (non-read-only) request is never redundant: it needs its own exact grant
+    every time (CONSENT_POLICY rule 3). A prior entry that was DENIED does not
+    make the repeat redundant either — the operator may answer differently.
+    """
+
+    if not isinstance(request, dict) or not _read_only(request):
+        return False
+    action, args_hash = request_identity(request)
+    if not action:
+        return False
+    for entry in previous or ():
+        if not isinstance(entry, dict) or not _read_only(entry):
+            continue
+        if entry.get("outcome") == "deny":
+            continue
+        if request_identity(entry) == (action, args_hash):
+            return True
+    return False
+
+
+def requested_this_session() -> list[dict]:
+    with _LOCK:
+        return [dict(entry) for entry in _REQUESTED]
+
+
+def _note_requested(run_id: int, request: dict, *, outcome: str | None) -> None:
+    action, args_hash = request_identity(request)
+    entry = {
+        "run_id": run_id,
+        "action": action,
+        "args_hash": args_hash,
+        "read_only": _read_only(request),
+        "outcome": outcome,
+        "ts": time.time(),
+    }
+    with _LOCK:
+        _REQUESTED.append(entry)
+        del _REQUESTED[:-_MAX_REQUESTED]
+
+
+def _note_outcome(run_id: int, outcome: str) -> None:
+    with _LOCK:
+        for entry in reversed(_REQUESTED):
+            if entry["run_id"] == run_id and entry["outcome"] is None:
+                entry["outcome"] = outcome
+                break
 
 
 def children_seen(run_id: int) -> tuple[int, int]:
@@ -201,6 +291,7 @@ def detach_session() -> None:
             pending.cancel_timer()
         _PENDING.clear()
         _RECONCILED.clear()
+        _REQUESTED.clear()
 
 
 def current_generation() -> int:
@@ -283,9 +374,27 @@ def _narrow_choices(event: dict) -> tuple[str, ...]:
 
 
 def _register(run_id: int, api_run_id: str, event: dict) -> None:
-    """Register one approval.request and announce it, or evict-deny for room."""
+    """Register one approval.request and announce it, or evict-deny for room.
+
+    Dedupe first (hermes-sip-live-voice#52): a read-only request identical to
+    one this session already GRANTED is answered ``once`` again on the
+    operator's behalf and logged, never re-asked. Anything else prompts.
+    """
 
     raw_request_id = event.get("request_id")
+    request_id = raw_request_id if isinstance(raw_request_id, str) and raw_request_id else None
+    if already_requested(requested_this_session(), event) and "once" in _narrow_choices(event):
+        _log.info(
+            "run %s repeated an already-granted read-only approval (%s) — auto-resolving, "
+            "not re-prompting",
+            run_id,
+            _request_text(event)[:80],
+        )
+        _note_requested(run_id, event, outcome="once")
+        _annotate(run_id, "once: auto-resolved (identical read-only request already granted)")
+        _spawn_daemon(_post_choice, api_run_id, "once", request_id, name="talk-approval-dedupe")
+        return
+    _note_requested(run_id, event, outcome=None)
     pending = _PendingApproval(
         api_run_id=api_run_id,
         request_text=_request_text(event),
@@ -554,6 +663,8 @@ def resolve(run_id: int, choice: str) -> str:
         ) -> None:
             late_kind, late_detail = outcomes.get()
             _annotate(_rid, f"{_choice}: {_late_wording(late_kind, late_detail)}")
+            if late_kind == "ok":
+                _note_outcome(_rid, _choice)
             if late_kind in ("ok", "gone"):
                 # The host accepted (or had already settled) this approval —
                 # finalize the record so no timer or barge-in can deny on top
@@ -580,6 +691,7 @@ def resolve(run_id: int, choice: str) -> str:
 
     _clear(run_id)
     _annotate(run_id, f"{choice}: accepted")
+    _note_outcome(run_id, choice)
     if choice == "deny":
         return (
             f"Denied — run {run_id} was told no. It will adapt or stop, and "
@@ -737,6 +849,7 @@ __all__ = [
     "EVENT_APPROVAL_PROMPT",
     "GRANTABLE_BY_VOICE",
     "RESOLVE_CONFIRM_WAIT_S",
+    "already_requested",
     "attach_session",
     "children_seen",
     "current_generation",
@@ -747,6 +860,8 @@ __all__ = [
     "note_prompt_sent",
     "pending_choices",
     "reconcile_from_poll",
+    "request_identity",
+    "requested_this_session",
     "reset_for_tests",
     "resolve",
     "watch_run",

@@ -54,6 +54,7 @@ from typing import Any
 
 try:
     from . import (
+        talk_api_steer,
         talk_apiserver,
         talk_approvals,
         talk_auth,
@@ -65,6 +66,7 @@ try:
         talk_vault,
     )
 except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path load)
+    import talk_api_steer
     import talk_apiserver
     import talk_approvals
     import talk_auth
@@ -545,6 +547,45 @@ def _continue_after_children(
     return final
 
 
+def _apply_followups(
+    run_id: int,
+    result: talk_apiserver.RunOutcome,
+    *,
+    session_key: str | None,
+    on_start,
+    on_event,
+) -> talk_apiserver.RunOutcome:
+    """Run corrections queued as follow-ups on the SAME api session (#56).
+
+    A correction that arrived while the run could not accept steer input is
+    the next turn of the same job, not replacement work. Only a successful
+    parent turn continues — a cancelled or failed job does not get corrected
+    behind the operator's back; its open receipts are superseded instead.
+    """
+
+    pending = talk_api_steer.pending_followups(run_id)
+    if not pending:
+        return result
+    if not result.succeeded or not result.session_id:
+        talk_api_steer.supersede_open(run_id, evidence=f"run_{result.outcome}")
+        return result
+    talk_runs.annotate_run(run_id, phase="applying_correction")
+    followup = talk_apiserver.run_for_worker(
+        talk_api_steer.followup_prompt(pending),
+        session_id=result.session_id,
+        session_key=session_key,
+        on_start=on_start,
+        on_event=on_event,
+        child_counter=lambda: talk_approvals.children_seen(run_id),
+    )
+    ids = [r["action_id"] for r in pending]
+    if followup.succeeded:
+        talk_api_steer.mark_applied(ids, evidence="followup_turn_completed")
+    else:
+        talk_api_steer.supersede_open(run_id, evidence=f"followup_{followup.outcome}")
+    return followup
+
+
 def _api_server_worker(task: str, *, session_id: str | None) -> Any:
     """Build the worker that runs one api_server agent run to completion.
 
@@ -614,6 +655,9 @@ def _api_server_worker(task: str, *, session_id: str | None) -> Any:
                 result = _continue_after_children(
                     run_id, result, session_key=session_key, on_start=_on_start, on_event=_on_poll
                 )
+            result = _apply_followups(
+                run_id, result, session_key=session_key, on_start=_on_start, on_event=_on_poll
+            )
         except talk_apiserver.TalkApiServerError as exc:
             message = str(exc)[-talk_runs.HISTORY_OUTPUT_CAP :]
             talk_runs.finish_run(
@@ -636,6 +680,7 @@ def _api_server_worker(task: str, *, session_id: str | None) -> Any:
             "api_session_id": result.session_id,
             "children_started": result.children_started,
             "children_finished": result.children_finished,
+            "sources_used": _sources_used(result.output),
         }
         if result.succeeded:
             talk_runs.finish_run(run_id, "done", text, outcome=talk_runs.OUTCOME_SUCCESS, **facts)
@@ -664,6 +709,54 @@ def _brief_meta(prompt: str) -> dict:
         except ImportError:  # pragma: no cover - flat-module fallback
             import talk_results
         return {"brief_version": talk_results.brief_version(prompt)}
+    except Exception:  # noqa: BLE001 — a missing stamp, never a refused run
+        return {}
+
+
+def _sources_used(output: str) -> str:
+    """The worker's SOURCES USED declaration (hermes-sip-live-voice#54), else undisclosed."""
+
+    try:
+        try:
+            from . import talk_brief
+        except ImportError:  # pragma: no cover - flat-module fallback
+            import talk_brief
+        return talk_brief.sources_used(output)
+    except Exception:  # noqa: BLE001 — a missing stamp, never a refused result
+        return "undisclosed"
+
+
+def _brief_label(prompt: str, brief: Any) -> str:
+    """The spoken label: the brief's goal when there is one, else the prompt head."""
+
+    goal = getattr(brief, "goal", None)
+    text = goal if isinstance(goal, str) and goal.strip() else prompt
+    return text.strip()[:60]
+
+
+def _envelope_meta(brief: Any) -> dict:
+    """Envelope facts recorded at acceptance (hermes-sip-live-voice#53/#54).
+
+    Heard/resolved target, required sources, snapshot reference and
+    completeness ride the run record so a later "which repo did it look at?"
+    is answered from the ticket, not from memory. Never the transcript text.
+    """
+
+    if brief is None:
+        return {}
+    try:
+        target = getattr(brief, "target", None) or {}
+        return {
+            "brief": {
+                "target_heard": target.get("heard"),
+                "target_resolved": target.get("resolved"),
+                "required_sources": list(getattr(brief, "required_sources", []) or []),
+                "snapshot_ref": getattr(brief, "snapshot_ref", None),
+                "completeness": getattr(brief, "completeness", None),
+                "context_mode": getattr(brief, "context_mode", None),
+                "known_gaps": list(getattr(brief, "known_gaps", []) or []),
+            }
+        }
     except Exception:  # noqa: BLE001 — a missing stamp, never a refused run
         return {}
 
@@ -1179,6 +1272,7 @@ class HostAdapter:
         *,
         execution_mode: str | None = None,
         resource_keys: Any = None,
+        brief: Any = None,
     ) -> str:
         """Hand a self-contained task to a background Hermes agent.
 
@@ -1234,12 +1328,12 @@ class HostAdapter:
                 return started
 
         via_api_server = self._run_api_server_agent(
-            prompt, execution_mode=execution_mode, resource_keys=resource_keys
+            prompt, execution_mode=execution_mode, resource_keys=resource_keys, brief=brief
         )
         if via_api_server is not None:
             return via_api_server
         return self._run_detached_agent(
-            prompt, execution_mode=execution_mode, resource_keys=resource_keys
+            prompt, execution_mode=execution_mode, resource_keys=resource_keys, brief=brief
         )
 
     def _run_api_server_agent(
@@ -1248,6 +1342,7 @@ class HostAdapter:
         *,
         execution_mode: str | None = None,
         resource_keys: Any = None,
+        brief: Any = None,
     ) -> str | None:
         """Tier 2: run the task on a real agent over the api_server.
 
@@ -1257,13 +1352,13 @@ class HostAdapter:
 
         if not talk_apiserver.is_available():
             return None
-        label = prompt.strip()[:60]
+        label = _brief_label(prompt, brief)
         try:
             run_id = talk_runs.start_run(
                 "agent",
                 label,
                 _api_server_worker(prompt, session_id=None),
-                meta=_brief_meta(prompt),
+                meta={**_brief_meta(prompt), **_envelope_meta(brief)},
                 execution_mode=execution_mode,
                 resource_keys=resource_keys,
             )
@@ -1282,6 +1377,7 @@ class HostAdapter:
         *,
         execution_mode: str | None = None,
         resource_keys: Any = None,
+        brief: Any = None,
     ) -> str:
         """Tier 3/4: run the task as a detached ``hermes -z`` one-shot."""
 
@@ -1292,13 +1388,13 @@ class HostAdapter:
                 "attached to this call, the api server isn't reachable, and "
                 "there's no `hermes` command on the PATH to run one."
             )
-        label = prompt.strip()[:60]
+        label = _brief_label(prompt, brief)
         try:
             run_id = talk_runs.start_run(
                 "agent",
                 label,
                 _detached_agent_worker(prompt, binary),
-                meta=_brief_meta(prompt),
+                meta={**_brief_meta(prompt), **_envelope_meta(brief)},
                 execution_mode=execution_mode,
                 resource_keys=resource_keys,
             )
@@ -1440,7 +1536,7 @@ class HostAdapter:
         # than being tried as a subagent id and coming back "no such job".
         run = _registry_run(agent_id)
         if run is not None:
-            return _unsteerable_run(run)
+            return _steer_registry_run(run, text, mode="steer")
 
         module = _delegation_module()
         if module is None:
@@ -1508,7 +1604,7 @@ class HostAdapter:
 
         run = _registry_run(agent_id)
         if run is not None:
-            return _unsteerable_run(run)
+            return _steer_registry_run(run, text, mode="redirect")
 
         module = _delegation_module()
         if module is None:
@@ -1735,6 +1831,7 @@ class HostAdapter:
                 # 2xx = the server ACCEPTED the stop ("stopping"), not
                 # that the agent is gone — say the request, not the outcome.
                 talk_runs.annotate_run(run_id, tee=True, stop_result="accepted")
+                talk_api_steer.supersede_open(run_id, evidence="stop_accepted")
                 return (
                     f"Sent the stop for run {run.get('runId')} — the "
                     "server is winding it down."
@@ -1884,6 +1981,31 @@ def _queued_reply(
         f"Passed it along to {subagent_id} — it's queued for their next step. "
         "I can't watch for delivery on this build, so I won't know if it lands."
     )
+
+
+def _steer_registry_run(run: dict, text: str, *, mode: str) -> str:
+    """Route a correction for a run NUMBER (hermes-sip-live-voice#56).
+
+    api_server runs go through :mod:`talk_api_steer` — exact ownership, one
+    durable action id, receipt states that never say "applied" for a queue
+    admission. Detached one-shots still have no channel and keep the honest
+    stop-and-restart offer.
+    """
+
+    meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
+    if (
+        meta.get("lane") != LANE_API_SERVER
+        or run.get("status") in talk_runs.TERMINAL_STATUSES
+        or not meta.get("api_run_id")
+    ):
+        # No channel yet (the remote id has not landed) or none at all: the
+        # honest pre-0.24 answer, with its REAL stop offer.
+        return _unsteerable_run(run)
+    try:
+        spoken, _receipt = talk_api_steer.steer(run, text, mode=mode)
+    except Exception as exc:  # noqa: BLE001 — the model speaks the failure
+        return f"I couldn't get that through: {type(exc).__name__}: {exc}"
+    return spoken
 
 
 def _unsteerable_run(run: dict) -> str:
