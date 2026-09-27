@@ -302,9 +302,19 @@ def live_capabilities(snapshot):
 
 def build_live_instructions(
     host_sections=None, *, lane=None, host_summary=None, capabilities=None, task_context=None,
+    lane_instructions=None,
 ):
-    """Build the client-delegation persona without Realtime function-tool instructions."""
+    """Build the client-delegation persona without Realtime function-tool instructions.
+
+    ``lane_instructions`` is the transport's TRUSTED operating pack
+    (:class:`talk_lane.LanePolicy`), already rendered and capped by the
+    producer. Same placement contract as :func:`build_instructions`: right
+    after the preamble and BEFORE the host identity sections. ``None``
+    renders nothing (hermes-sip-live-voice#19, #26).
+    """
     sections = [LIVE_PREAMBLE]
+    if lane_instructions:
+        sections.append(f"{LANE_INSTRUCTIONS_HEADER}:\n\n{str(lane_instructions).strip()}")
     for name in ("PERSONA", "USER"):
         value = next((value for key, value in (host_sections or {}).items()
                       if key.upper() == name), None)
