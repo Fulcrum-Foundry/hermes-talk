@@ -19,7 +19,9 @@ import copy
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 # ``talk_doctor`` imports this module back (for its registration receipts),
 # so this pair is a cycle. It resolves because NEITHER module touches the
@@ -475,10 +477,26 @@ def default_talk_tools(*, pausable: bool = False) -> list[dict]:
     return copy.deepcopy(tools)
 
 
+#: Lane-owned tool handlers (talk_lane.LanePolicy.handlers), registered per
+#: session start. Kept apart from the built-in table so a lane can never
+#: shadow a built-in and a new session replaces the previous lane's set.
+_LANE_HANDLERS: dict[str, Callable[[dict], Any]] = {}
+
+
+def register_lane_handlers(handlers: dict[str, Callable[[dict], Any]] | None) -> None:
+    """Install this session's lane tools; ``None``/empty clears them."""
+
+    _LANE_HANDLERS.clear()
+    for name, handler in (handlers or {}).items():
+        if name in _HANDLERS:
+            raise ValueError(f"lane handler {name!r} collides with a built-in talk tool")
+        _LANE_HANDLERS[name] = handler
+
+
 def execute_talk_tool(name: str, arguments: dict | None) -> str:
     """Dispatch one tool call and return plain text for the model to speak."""
 
-    handler = _HANDLERS.get(name)
+    handler = _HANDLERS.get(name) or _LANE_HANDLERS.get(name)
     if handler is None:
         raise TalkToolError(f"unknown talk tool: {name!r}")
     try:
@@ -558,20 +576,34 @@ def _describe_age(run: dict) -> str:
 
 
 def _describe_run(run: dict) -> str:
-    line = f"run {run.get('runId')} ({run.get('kind')}) {run.get('status')}"
-    if run.get("status") == "running":
+    status = run.get("status")
+    raw_meta = run.get("meta")
+    meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
+    if status in talk_runs.TERMINAL_STATUSES:
+        # The typed outcome is what actually happened; "done"/"failed" is
+        # only the local lifecycle (hermes-sip-live-voice#49).
+        outcome = talk_runs.run_outcome(run)
+        shown = "finished" if outcome == talk_runs.OUTCOME_SUCCESS else outcome
+        line = f"run {run.get('runId')} ({run.get('kind')}) {shown}"
+    else:
+        line = f"run {run.get('runId')} ({run.get('kind')}) {status}"
+    if status == "running":
         line += _describe_age(run)
+        if meta.get("phase") == "awaiting_children":
+            waiting = meta.get("children_outstanding", "?")
+            line += f" — the agent's turn ended; waiting on {waiting} delegated task(s)"
+        elif meta.get("phase") == "synthesizing":
+            line += " — all delegated tasks reported; writing the final answer"
         # What a live run holds (hermes-talk#101), so "why was that refused?"
         # has an answer the model can read out.
         admission = run.get("admission") if isinstance(run.get("admission"), dict) else {}
         held = [key for key in admission.get("keys") or () if isinstance(key, str)]
         if held:
             line += " holding " + ", ".join(f"'{key}'" for key in held)
-    if run.get("status") == "lost":
+    if status == "lost":
         line += " (started before this session — I can't see how it ended)"
     # A stop verb's detached confirmation lands in meta (hermes-talk#2) —
     # this is where "ask me in a moment for the receipt" pays off.
-    meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
     if meta.get("stop_result"):
         line += f" — stop receipt: {meta['stop_result']}"
     return line
@@ -894,4 +926,5 @@ __all__ = [
     "default_talk_tools",
     "execute_talk_tool",
     "plugin_version",
+    "register_lane_handlers",
 ]

@@ -797,31 +797,99 @@ def _accept_run(entry: dict) -> int:
         ) from exc
 
 
+#: ``meta.outcome`` categories (hermes-sip-live-voice#49). ``status`` stays
+#: the two-valued local lifecycle every consumer already reads; ``outcome``
+#: is the truthful category of what the remote work came to. Only
+#: ``OUTCOME_SUCCESS`` may ever be spoken as "finished".
+OUTCOME_SUCCESS = "success"
+OUTCOME_FAILED = "failed"
+OUTCOME_CANCELLED = "cancelled"
+OUTCOME_INTERRUPTED = "interrupted"
+OUTCOME_TIMEOUT = "timeout"
+OUTCOME_UNKNOWN = "unknown"
+OUTCOME_INCOMPLETE = "incomplete"
+OUTCOMES = frozenset(
+    {
+        OUTCOME_SUCCESS,
+        OUTCOME_FAILED,
+        OUTCOME_CANCELLED,
+        OUTCOME_INTERRUPTED,
+        OUTCOME_TIMEOUT,
+        OUTCOME_UNKNOWN,
+        OUTCOME_INCOMPLETE,
+    }
+)
+
+
+def run_outcome(run: dict | None) -> str:
+    """The truthful outcome category of a terminal run record.
+
+    A record finished before outcomes existed carries none; its ``status`` is
+    the only evidence, so ``done`` reads as success and ``failed`` as failed.
+    A ``lost`` record (history without a terminal tee) is unknown.
+    """
+
+    if not isinstance(run, dict):
+        return OUTCOME_UNKNOWN
+    raw_meta = run.get("meta")
+    meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
+    explicit = meta.get("outcome")
+    if isinstance(explicit, str) and explicit in OUTCOMES:
+        return explicit
+    status = run.get("status")
+    if status == "done":
+        return OUTCOME_SUCCESS
+    if status == "failed":
+        return OUTCOME_FAILED
+    return OUTCOME_UNKNOWN
+
+
 def _run_worker(run_id: int, worker: Callable[[int], str]) -> None:
     try:
         output = worker(run_id)
-        finish_run(run_id, "done", output)
+        # A worker that already finished the run with a typed outcome wins
+        # (first-writer). This default is for legacy workers that only return
+        # text: text back with no exception is the only success evidence.
+        finish_run(run_id, "done", output, outcome=OUTCOME_SUCCESS)
     except Exception as exc:  # noqa: BLE001 — a run must always terminate
         _log.warning("talk run %s failed: %s: %s", run_id, type(exc).__name__, exc)
-        finish_run(run_id, "failed", f"{type(exc).__name__}: {exc}")
+        finish_run(run_id, "failed", f"{type(exc).__name__}: {exc}", outcome=OUTCOME_FAILED)
 
 
-def finish_run(run_id: int, status: str, output: str) -> bool:
+def finish_run(
+    run_id: int, status: str, output: str, *, outcome: str | None = None, **fields: Any
+) -> bool:
     """Mark a run terminal. Unknown ids and double-finishes are no-ops.
 
     Terminal transitions are compare-and-set under ``_RUN_LOCK`` — FIRST
     WRITER WINS, so a later finish from any path can never overwrite the
     status or output. Returns True when THIS call performed the transition.
+
+    ``outcome`` is the truthful category (see :data:`OUTCOMES`); it defaults
+    from ``status`` (``done`` → success, ``failed`` → failed) so a caller that
+    knows only the lifecycle still records a consistent pair. A non-success
+    outcome with ``status="done"`` is a contradiction and is refused.
+    Extra ``fields`` merge into ``meta`` in the same transition, so the
+    remote status, error category and ids ride the terminal tee.
     """
 
     if status not in TERMINAL_STATUSES:
         raise ValueError(f"not a terminal status: {status!r}")
+    if outcome is None:
+        outcome = OUTCOME_SUCCESS if status == "done" else OUTCOME_FAILED
+    if outcome not in OUTCOMES:
+        raise ValueError(f"not an outcome: {outcome!r}")
+    if status == "done" and outcome != OUTCOME_SUCCESS:
+        raise ValueError(f"status 'done' cannot carry outcome {outcome!r}")
     with _RUN_LOCK:
         run = _RUNS.get(run_id)
         if run is None or run["status"] in TERMINAL_STATUSES:
             return False
         run["status"] = status
         run["output"] = output
+        run["meta"]["outcome"] = outcome
+        if fields:
+            run["meta"].update(fields)
         run["updated"] = time.time()
         tee = _terminal_tee_locked(run_id, run)
     _append_history(tee)
@@ -1398,6 +1466,14 @@ __all__ = [
     "HISTORY_OUTPUT_CAP",
     "MAX_RESOURCE_KEYS",
     "MAX_RESOURCE_KEY_CHARS",
+    "OUTCOMES",
+    "OUTCOME_CANCELLED",
+    "OUTCOME_FAILED",
+    "OUTCOME_INCOMPLETE",
+    "OUTCOME_INTERRUPTED",
+    "OUTCOME_SUCCESS",
+    "OUTCOME_TIMEOUT",
+    "OUTCOME_UNKNOWN",
     "RUN_KINDS",
     "TERMINAL_STATUSES",
     "AdmissionRefused",
@@ -1420,6 +1496,7 @@ __all__ = [
     "reset_for_tests",
     "resolve_execution_mode",
     "resolve_run_record",
+    "run_outcome",
     "start_run",
     "started_sentinel",
     "terminate_process",

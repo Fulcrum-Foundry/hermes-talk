@@ -567,7 +567,9 @@ def test_annotate_without_tee_stays_in_memory(history_env: Path):
 
     runs = talk_runs.list_runs(include_history=True)
     reloaded = next(r for r in runs if r["runId"] == run_id)
-    assert reloaded["meta"] == {}  # default tee-less annotate: telemetry only
+    # default tee-less annotate: telemetry only. The terminal tee carries the
+    # typed outcome (hermes-sip-live-voice#49) and nothing else.
+    assert reloaded["meta"] == {"outcome": talk_runs.OUTCOME_SUCCESS}
 
 
 def test_terminal_tee_carries_meta_so_compaction_cannot_erase_it(history_env: Path):

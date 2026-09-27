@@ -55,6 +55,7 @@ try:
         talk_grok_realtime,
         talk_host,
         talk_identity,
+        talk_lane,
         talk_lifecycle,
         talk_openai_realtime,
         talk_operator_auth,
@@ -85,6 +86,7 @@ except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path
     import talk_grok_realtime
     import talk_host
     import talk_identity
+    import talk_lane
     import talk_lifecycle
     import talk_openai_realtime
     import talk_operator_auth
@@ -914,14 +916,39 @@ def run_finished_messages(run: dict) -> list[dict]:
     ]
 
 
+#: Outcome category → the verb the operator hears (hermes-sip-live-voice#49).
+#: Only ``success`` may say "finished". Every other category names what
+#: actually happened; an unknown category says so rather than guessing.
+_OUTCOME_VERBS = {
+    talk_runs.OUTCOME_SUCCESS: "finished",
+    talk_runs.OUTCOME_FAILED: "failed",
+    talk_runs.OUTCOME_CANCELLED: "was cancelled",
+    talk_runs.OUTCOME_INTERRUPTED: "was interrupted before it finished",
+    talk_runs.OUTCOME_TIMEOUT: "ran out of time and was abandoned",
+    talk_runs.OUTCOME_INCOMPLETE: "ended without a final result",
+    talk_runs.OUTCOME_UNKNOWN: "ended in an unknown state",
+}
+
+
 def run_finished_commands(run: dict) -> list[talk_realtime.RealtimeCommand]:
-    """Provider-neutral commands that make the model speak a finished run."""
+    """Provider-neutral commands that make the model speak a terminal run.
+
+    The verb comes from the run's typed outcome, never from the two-valued
+    local status alone: a cancelled, interrupted or unfinished job is named
+    as such, and the trailing output is framed as PARTIAL for anything that
+    is not a success so the model cannot present it as the answer.
+    """
 
     tail = str(run.get("output") or "").strip()[-WATCH_OUTPUT_TAIL_CHARS:]
-    verb = "finished" if run.get("status") == "done" else "failed"
-    headline = f"Background run #{run.get('runId')} {verb}" + (
+    outcome = talk_runs.run_outcome(run)
+    verb = _OUTCOME_VERBS.get(outcome, _OUTCOME_VERBS[talk_runs.OUTCOME_UNKNOWN])
+    label = str(run.get("label") or "").strip()[:_PROGRESS_LABEL_CHARS]
+    label_part = f" ({label})" if label else ""
+    headline = f"Background run #{run.get('runId')}{label_part} {verb}" + (
         "." if tail else " with no output."
     )
+    if outcome != talk_runs.OUTCOME_SUCCESS and tail:
+        headline += " What follows is partial or diagnostic output, not a completed result."
     return _announcement_commands(headline, tail)
 
 
@@ -1553,8 +1580,14 @@ async def run_talk_session(
     native_task_api=None,
     control_input=None,
     on_native_controller=None,
+    lane_policy=None,
 ) -> int:
     """Run one voice session. Returns a process exit code.
+
+    ``lane_policy`` is an optional :class:`talk_lane.LanePolicy`: the
+    transport's trusted operating pack, heartbeat/memory switches and extra
+    lane tools (hermes-sip-live-voice#26, #51, #35, #57). ``None`` runs the
+    session exactly as before this parameter existed.
 
     ``audio`` is any object with :class:`talk_audio.DuplexAudio`'s surface —
     the terminal's microphone by default, or a Discord voice channel
@@ -1653,12 +1686,25 @@ async def run_talk_session(
     else:
         resume_control = None
 
+    policy = talk_lane.coerce(lane_policy, lane)
     try:
         tools = (
             host_execution_attachment.tool_definitions()
             if host_execution_attachment is not None
             else talk_tools.default_talk_tools(pausable=resume_control is not None)
         )
+        if policy.tools:
+            # Lane-owned controls (end_call, hold...) ride with the session's
+            # own tools and dispatch through the same contract; a lane tool
+            # whose name collides with a built-in is refused, not shadowed.
+            names = {t.get("name") for t in tools if isinstance(t, dict)}
+            for extra in policy.tools:
+                if extra.get("name") in names:
+                    raise RuntimeError(
+                        f"lane tool {extra.get('name')!r} collides with a built-in tool"
+                    )
+            tools = [*tools, *policy.tools]
+            talk_tools.register_lane_handlers(policy.handlers)
     except Exception as exc:  # noqa: BLE001 - host attachment startup boundary
         print(f"talk: host tool setup failed: {type(exc).__name__}", file=sys.stderr)
         # The legacy lane reaches this handler with NO attachment (its tools
@@ -1683,7 +1729,9 @@ async def run_talk_session(
         lane=lane,
         host_summary=_host_summary_line() if lane == "cli" else None,
         capabilities=talk_capabilities.instruction_section(catalog_snapshot),
+        lane_instructions=policy.rendered_instructions(),
     )
+    _log.info("talk lane policy: %s", json.dumps(policy.receipt(), default=str))
 
     # Find out NOW whether the api_server lane is up. The verdict is needed by
     # the first tool call; warming it before then avoids spending that tool's
@@ -1789,7 +1837,11 @@ async def run_talk_session(
     def on_error(text: str) -> None:
         print(f"\n[talk] {text}", file=sys.stderr, flush=True)
 
-    capture = talk_transcript.TranscriptCapture(hermes_home)
+    capture = (
+        talk_transcript.TranscriptCapture(hermes_home, memory_review=False)
+        if policy.memory_review is False
+        else talk_transcript.TranscriptCapture(hermes_home)
+    )
     relay = RealtimeRelay(
         on_audio=audio.queue_playback,
         on_caption=on_caption,
@@ -1955,7 +2007,11 @@ async def run_talk_session(
             """
 
             deadline = time.monotonic() + talk_config.agent_timeout_s()
-            progress = talk_progress.RunProgressWatch()
+            progress = talk_progress.RunProgressWatch(
+                heartbeat_s=(
+                    float("inf") if policy.spoken_heartbeats is False else talk_progress.HEARTBEAT_S
+                )
+            )
             while time.monotonic() < deadline:
                 await asyncio.sleep(WATCH_POLL_S)
                 run = talk_runs.get_run(run_id)

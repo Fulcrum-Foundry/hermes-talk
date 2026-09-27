@@ -11,6 +11,41 @@ but 0.4.0's release title named only the steering verb. They are recorded
 below under 0.4.0 — the first version that shipped them — with the gap
 named rather than smoothed.
 
+## [0.22.0] — 2026-09-26
+
+Truthful outcomes for delegated work and a policy hook for the lane that
+starts a session. Fulcrum fork; driven by the hermes-sip-live-voice
+executive-assistant review (#48 there).
+
+### Added
+- `talk_apiserver.RunOutcome` and `run_to_outcome`: one typed result per
+  api_server run with `success / failed / cancelled / interrupted / timeout /
+  unknown / incomplete`, the host's verbatim status, partial output and ids.
+  `run_to_completion` stays as a string wrapper. An unknown host status is
+  terminal-unknown, never polled to the deadline and never success.
+- `talk_runs.finish_run(outcome=...)` and `run_outcome()`: the registry records
+  the outcome beside the two-valued lifecycle; `status="done"` with a
+  non-success outcome is refused. Announcements (`run_finished_commands`) and
+  `check_work` speak from the outcome, so a cancelled job is "was cancelled"
+  with its output framed as partial, never "finished".
+- Nested delegated work: the approval sidecar counts `subagent.start/complete`
+  on the run stream. A parent turn that returns with children outstanding is
+  `incomplete`; the worker waits for the host's parked delivery rows on the
+  session (`GET /api/sessions/{id}/messages`) and posts ONE follow-up run that
+  synthesizes the final answer. Children that never report leave an honest
+  incomplete. No Hermes core change.
+- `talk_lane.LanePolicy` and `run_talk_session(lane_policy=...)`: a transport
+  can inject a trusted, capped operating pack ahead of the identity sections,
+  disable spoken heartbeats, keep the transcript without handing it to the
+  durable-memory review (`TranscriptCapture(memory_review=False)` writes to
+  `state/talk-transcripts-retained/`), and expose lane-owned tools
+  (`talk_tools.register_lane_handlers`) that cannot shadow built-ins. A
+  session with no policy runs exactly as before.
+
+### Changed
+- `TERMINAL_RUN_STATUSES` includes `interrupted`; `run.interrupted` maps to the
+  stopped phase.
+
 ## [0.21.0] — 2026-09-16
 
 Talk works on a stock Hermes Desktop, and the refusal text stops asking for an

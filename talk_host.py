@@ -41,6 +41,7 @@ a bare ``hermes -z`` cannot resolve a model and the child dies immediately.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import logging
 import queue
@@ -455,6 +456,95 @@ def _detached_agent_worker(task: str, binary: str) -> Any:
     return worker
 
 
+#: How long the phone worker keeps a job "working" while its delegated
+#: children finish after the parent turn returned (hermes-sip-live-voice#50).
+#: Bounded by the same agent budget as the run itself.
+CHILD_WAIT_POLL_S = 2.0
+CONTINUATION_PROMPT = (
+    "Your delegated background work has finished and its results are now in this "
+    "session's history. Read them and give the final, complete answer to the "
+    "original request. Do not start new delegated work. If a result is missing or "
+    "failed, say exactly which one and what is known."
+)
+
+
+def _continue_after_children(
+    run_id: int,
+    first: talk_apiserver.RunOutcome,
+    *,
+    session_key: str | None,
+    on_start,
+    on_event,
+) -> talk_apiserver.RunOutcome:
+    """Turn an INCOMPLETE parent turn into one truthful final outcome.
+
+    The host's contract for an api_server session: a parent run whose agent
+    spawned ``delegate_task(background=true)`` children finishes as soon as
+    the agent's turn ends, and each child's result is parked on the session
+    as a delivery row for the NEXT run to read (gateway/wake.py). Nothing
+    wakes the model on its own. So the phone lane must (1) not call the
+    parent "finished", (2) wait for every outstanding child's row, and (3)
+    post ONE follow-up run on the same session that reads those rows and
+    synthesizes the final answer. That follow-up's outcome is the job's
+    outcome. If the rows never land within the budget the job is reported
+    as incomplete, never as success. No core change is required: this reads
+    the documented messages endpoint and submits an ordinary run.
+    """
+
+    session_id = first.session_id
+    if not session_id:
+        return first  # nothing to continue on; the honest incomplete stands
+    baseline = None
+    with contextlib.suppress(Exception):
+        baseline = talk_apiserver.latest_message_id(session_id)
+    outstanding = first.children_outstanding
+    talk_runs.annotate_run(
+        run_id,
+        tee=True,
+        phase="awaiting_children",
+        children_outstanding=outstanding,
+        api_session_id=session_id,
+    )
+    deadline = time.monotonic() + talk_config.agent_timeout_s()
+    seen = 0
+    while time.monotonic() < deadline:
+        time.sleep(CHILD_WAIT_POLL_S)
+        try:
+            rows = talk_apiserver.pending_child_deliveries(session_id, after_message_id=baseline)
+        except talk_apiserver.TalkApiServerError:
+            _log.debug("child delivery poll failed for run %s", run_id, exc_info=True)
+            continue
+        seen = len(rows)
+        if seen >= outstanding:
+            break
+    if seen < outstanding:
+        return dataclasses.replace(
+            first,
+            error=(
+                f"{outstanding - seen} of {outstanding} delegated task(s) never "
+                "reported back within the time budget"
+            ),
+            children_finished=first.children_finished + seen,
+        )
+    talk_runs.annotate_run(run_id, phase="synthesizing", children_outstanding=0)
+    talk_approvals.forget_children(run_id)
+    final = talk_apiserver.run_for_worker(
+        CONTINUATION_PROMPT,
+        session_id=session_id,
+        session_key=session_key,
+        on_start=on_start,
+        on_event=on_event,
+        child_counter=lambda: talk_approvals.children_seen(run_id),
+    )
+    if final.outcome == talk_apiserver.OUTCOME_INCOMPLETE:
+        # The synthesis turn spawned more work. One level is honoured; a
+        # second recursion would be unbounded, so report what is known.
+        return dataclasses.replace(
+            final, error="the follow-up turn started more delegated work instead of answering"
+        )
+    return final
+
+
 def _api_server_worker(task: str, *, session_id: str | None) -> Any:
     """Build the worker that runs one api_server agent run to completion.
 
@@ -512,17 +602,48 @@ def _api_server_worker(task: str, *, session_id: str | None) -> Any:
                 )
 
         try:
-            return talk_apiserver.run_to_completion(
+            result = talk_apiserver.run_for_worker(
                 task,
                 session_id=session_id,
                 session_key=session_key,
                 on_start=_on_start,
                 on_event=_on_poll,
-            )[: talk_runs.HISTORY_OUTPUT_CAP]
+                child_counter=lambda: talk_approvals.children_seen(run_id),
+            )
+            if result.outcome == talk_apiserver.OUTCOME_INCOMPLETE:
+                result = _continue_after_children(
+                    run_id, result, session_key=session_key, on_start=_on_start, on_event=_on_poll
+                )
         except talk_apiserver.TalkApiServerError as exc:
             message = str(exc)[-talk_runs.HISTORY_OUTPUT_CAP :]
-            talk_runs.finish_run(run_id, "failed", message)
+            talk_runs.finish_run(
+                run_id,
+                "failed",
+                message,
+                outcome=talk_runs.OUTCOME_FAILED,
+                error_category="transport",
+            )
             return message
+        finally:
+            talk_approvals.forget_children(run_id)
+        # The typed outcome is recorded HERE, first-writer, so the registry's
+        # own done-transition on return is a no-op and can never relabel a
+        # cancelled, failed, interrupted or unfinished run as "done"
+        # (hermes-sip-live-voice#49, #50).
+        text = result.speakable()[: talk_runs.HISTORY_OUTPUT_CAP]
+        facts = {
+            "remote_status": result.remote_status,
+            "api_session_id": result.session_id,
+            "children_started": result.children_started,
+            "children_finished": result.children_finished,
+        }
+        if result.succeeded:
+            talk_runs.finish_run(run_id, "done", text, outcome=talk_runs.OUTCOME_SUCCESS, **facts)
+        else:
+            if result.error:
+                facts["error_category"] = result.outcome
+            talk_runs.finish_run(run_id, "failed", text, outcome=result.outcome, **facts)
+        return text
 
     return worker
 

@@ -171,6 +171,9 @@ CAPABILITIES_CAP = 1_200
 #: it as a live read instead of a remembered one.
 CAPABILITIES_HEADER = "What this Hermes install can do right now (live catalog)"
 
+#: Header for the transport's trusted operating pack (talk_lane.LanePolicy).
+LANE_INSTRUCTIONS_HEADER = "Operating policy for this call (trusted, set by the host)"
+
 
 def lane_line(lane: str | None) -> str:
     """The lane sentence for one built prompt. Never falsy, never invented."""
@@ -290,6 +293,7 @@ def build_instructions(
     lane: str | None = None,
     host_summary: str | None = None,
     capabilities: str | None = None,
+    lane_instructions: str | None = None,
 ) -> str:
     """Assemble the Realtime session prompt.
 
@@ -308,9 +312,18 @@ def build_instructions(
     CAPABILITIES_CAP and rendered just ahead of the lane line. ``None``
     fails open to the plain prompt — exactly what sessions shipped before
     the section existed.
+
+    ``lane_instructions`` is the transport's TRUSTED operating pack
+    (:class:`talk_lane.LanePolicy`), already rendered and capped by the
+    producer. It rides right after the fixed preamble and tool contracts and
+    BEFORE the host identity sections, so lane policy (owner, delivery
+    rules, controls) frames the persona rather than the other way round.
+    ``None`` renders nothing.
     """
 
     sections: list[str] = []
+    if lane_instructions:
+        sections.append(f"{LANE_INSTRUCTIONS_HEADER}:\n\n{lane_instructions.strip()}")
     if host_sections:
         # Match known names case-INSENSITIVELY. The obvious spelling of this
         # loop (exact `in` for known, `.upper() not in` for extra) drops a
@@ -361,6 +374,7 @@ __all__ = [
     "IDENTITY_CAPS",
     "IDENTITY_HEADERS",
     "IDENTITY_ORDER",
+    "LANE_INSTRUCTIONS_HEADER",
     "LANE_LINES",
     "LIVE_PREAMBLE",
     "VOICE_PREAMBLE",
