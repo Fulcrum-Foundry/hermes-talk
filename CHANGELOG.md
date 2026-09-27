@@ -24,6 +24,9 @@ named rather than smoothed.
   the conversation: the deferred scheduler holds them until the caller's first
   finalized turn, so a call never starts with "run nine is ready". Found in a
   live simulator call after the binding landed.
+- A detached child that `stop_work`/`cancel_job` terminated is recorded and
+  spoken as CANCELLED, not failed ("exited -15"). Found in a live simulator
+  call.
 
 ## [0.24.0] — 2026-09-27
 
