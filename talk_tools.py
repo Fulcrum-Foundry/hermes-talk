@@ -872,7 +872,7 @@ def _describe_run(run: dict) -> str:
         if held:
             line += " holding " + ", ".join(f"'{key}'" for key in held)
     if status == "lost":
-        line += " (started before this session — I can't see how it ended)"
+        line += " (started before this call — I can't see how it ended)"
     # A stop verb's detached confirmation lands in meta (hermes-talk#2) —
     # this is where "ask me in a moment for the receipt" pays off.
     if meta.get("stop_result"):
@@ -889,7 +889,7 @@ def _handle_check_work(arguments: dict) -> str:
             return "check_work needs a run number."
         run = talk_runs.get_run(wanted)
         if run is None:
-            return f"I don't have work numbered {wanted} in this session."
+            return f"Nothing on this call matches {wanted}; refer to the work by what it is."
         # An explicit status request IS the delivery (hermes-sip-live-voice#51):
         # a completion parked by the deferred scheduler is released here so it
         # is never spoken a second time behind this answer.
@@ -1098,7 +1098,7 @@ def _handle_deliver_when_done(arguments: dict) -> str:
         return "deliver_when_done needs the run number of the job to deliver."
     run = talk_runs.get_run(run_id)
     if run is None:
-        return f"I don't have a run number {run_id} in this session."
+        return f"Nothing on this call matches {run_id}; refer to the work by what it is."
     label = str(run.get("label") or "").strip() or "that job"
     if not talk_controls.snapshot()["attached"] or talk_announce.current() is None:
         return "No live voice session is attached, so there is nothing to deliver into."
@@ -1163,7 +1163,7 @@ def _handle_get_result(arguments: dict) -> str:
     except KeyError:
         known = talk_results.list_records()
         if not known:
-            return "No finished results are saved for this session yet."
+            return "Nothing has finished on this call yet."
         options = "; ".join(talk_results.describe(c) for c in known[-6:])
         return f"I don't have a result matching that. Saved results: {options}."
     run_id = int(entry["run_id"])

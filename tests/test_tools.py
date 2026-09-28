@@ -448,7 +448,7 @@ def test_talk_status_survives_an_unusable_voice(monkeypatch):
 
 def test_search_memory_degrades_without_a_host():
     result = talk_tools.execute_talk_tool("search_memory", {"query": "the deploy"})
-    assert "memory isn't available" in result
+    assert "can't get to memory" in result
     assert "Traceback" not in result
 
 
@@ -523,7 +523,7 @@ def test_check_work_by_id_speaks_the_output():
 
 def test_check_work_by_unknown_id():
     out = talk_tools.execute_talk_tool("check_work", {"run_id": 4242})
-    assert "don't have work numbered" in out
+    assert "Nothing on this call matches" in out
 
 
 def test_check_work_rejects_a_non_numeric_id():

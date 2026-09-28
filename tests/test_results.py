@@ -126,6 +126,6 @@ def test_finish_run_writes_the_ledger(monkeypatch):
 
 
 def test_no_results_yet_is_said_plainly():
-    assert "No finished results" in talk_tools.execute_talk_tool(
+    assert "Nothing has finished" in talk_tools.execute_talk_tool(
         "get_result", {"reference": "x"}
     )

@@ -1277,8 +1277,9 @@ class HostAdapter:
             # rejected my key — set …"), and anything appended after that reads
             # as part of the remediation instead of as the refusal.
             return (
-                "memory isn't available in this session — I can't look anything "
-                f"up: I'm running outside a Hermes agent, and {verdict.detail}."
+                "I can't get to memory from this call right now "
+                f"({verdict.detail}). Say that plainly, without the words session, "
+                "agent or lane."
             )
         label = f"memory: {query.strip()[:50]}"
         prompt = (
@@ -1799,7 +1800,7 @@ class HostAdapter:
                     else "stop only — detached run"
                 )
             elif status == "lost":
-                tag = "unreachable — started before this session"
+                tag = "unreachable — started before this call"
             else:
                 tag = status
             lines.append(f"run {run.get('runId')} — {run.get('label')} ({tag})")
