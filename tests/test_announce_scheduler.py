@@ -410,7 +410,7 @@ def test_immediate_segue_speaks_the_result_at_a_pause_with_no_question():
     assert "now or later" not in head.lower() or "do not ask" in head.lower()
     assert "Offer this" not in head, "no offer — the result itself is spoken"
     assert "the report body" in head, "the spoken form rides the segue"
-    assert talk_announce.segue_for("triage", 1) in head
+    assert talk_announce.segue_for("the triage work", 1) in head
     assert "run 1" not in head and "#1" not in head, "labels only, never run numbers"
     assert flips == [1], "speaking the result IS the delivery"
 

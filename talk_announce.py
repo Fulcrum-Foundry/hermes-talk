@@ -438,9 +438,20 @@ def reset_for_tests() -> None:
 
 
 def _label(run: dict) -> str:
-    """The run's spoken name — its label, never its number."""
+    """The run's spoken name — its label, never its number.
 
-    return str(run.get("label") or "").strip()[:_LABEL_CHARS] or _UNLABELLED
+    A name the model chose to say aloud (``meta.named``) is used as is; an
+    automatic label (the first words of the ask) is shortened so "Quick update
+    on Text me: Hey, we're on the phone right now together.:" is never heard.
+    """
+
+    raw = str(run.get("label") or "").strip()
+    meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
+    if raw and meta.get("named"):
+        return raw[:_LABEL_CHARS]
+    if raw:
+        return f"the {talk_brief.spoken_label(raw, 5)} work"
+    return _UNLABELLED
 
 
 def segue_for(label: str, run_id: int) -> str:
@@ -485,7 +496,7 @@ def segue_result_commands(
     else:
         state = f"ended {outcome}"
     headline = (
-        f"Natural pause: the work on {label} {state}. Say exactly this transition "
+        f"Natural pause: {label} {state}. Say exactly this transition "
         f"first — \"{opener}\" — then give the result below in one to three "
         "spoken sentences. Do not ask whether they want it now or later; do not "
         "say a run number; do not read it verbatim."
