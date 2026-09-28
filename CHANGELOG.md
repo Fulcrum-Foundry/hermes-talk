@@ -11,6 +11,18 @@ but 0.4.0's release title named only the steering verb. They are recorded
 below under 0.4.0 — the first version that shipped them — with the gap
 named rather than smoothed.
 
+## [0.25.1] — 2026-09-28
+
+### Added
+- Retained and memory-review transcript rows carry `ts` (epoch seconds, UTC,
+  millisecond precision) for every user and assistant turn, so a call
+  transcript can be lined up with delegated runs and call logs
+  (hermes-sip-live-voice#79). The timestamp is captured once per turn and is
+  the same value in the in-memory ring and the durable row. Rows written
+  before this release (`{role, text}` only) still load and hand off; no
+  timestamp is invented for them. The memory-review prompt is unchanged
+  (role and text only).
+
 ## [0.25.0] — 2026-09-28
 
 Seamless voice (hermes-sip-live-voice #64). One assistant, invisible machinery.

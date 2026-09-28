@@ -39,13 +39,17 @@ def _capture(tmp_path, turns):
 # -- snapshot -----------------------------------------------------------------
 
 
-def test_capture_ring_carries_ids_and_timestamps_and_file_is_unchanged(tmp_path):
+def test_capture_ring_carries_ids_and_the_file_carries_the_same_timestamps(tmp_path):
     capture = _capture(tmp_path, [("user", "hello"), ("assistant", "hi"), ("user", "  ")])
     turns = capture.turns()
     assert [t["id"] for t in turns] == ["t-000001", "t-000002"]
     assert all(isinstance(t["ts"], float) for t in turns)
     rows = [json.loads(line) for line in capture.path.read_text().splitlines()]
-    assert rows == [{"role": "user", "text": "hello"}, {"role": "assistant", "text": "hi"}]
+    # Ring ids stay in memory; the row gains the ring's timestamp (sip #79).
+    assert rows == [
+        {"role": "user", "text": "hello", "ts": turns[0]["ts"]},
+        {"role": "assistant", "text": "hi", "ts": turns[1]["ts"]},
+    ]
     capture.finish()
 
 

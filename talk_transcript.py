@@ -259,14 +259,23 @@ class TranscriptCapture:
         with _ACTIVE_LOCK:
             return self._dropped
 
-    def _ring_append(self, role: str, text: str) -> None:
-        """Ring write under the same lock as the file write; never raises."""
+    def _ring_append(self, role: str, text: str, ts: float | None = None) -> None:
+        """Ring write under the same lock as the file write; never raises.
+
+        ``ts`` is the turn's single captured timestamp (sip #79): the ring and
+        the durable row carry the same value for the same turn.
+        """
 
         self._turn_seq += 1
         if len(self._ring) == self._ring.maxlen:
             self._dropped += 1
         self._ring.append(
-            {"id": f"t-{self._turn_seq:06d}", "role": role, "text": text, "ts": time.time()}
+            {
+                "id": f"t-{self._turn_seq:06d}",
+                "role": role,
+                "text": text,
+                "ts": time.time() if ts is None else ts,
+            }
         )
 
     def append_turn(self, role: str, text: str) -> None:
@@ -280,12 +289,17 @@ class TranscriptCapture:
         ):
             _log.warning("invalid Talk transcript turn was dropped")
             return
-        row = json.dumps({"role": role, "text": text}, ensure_ascii=False, separators=(",", ":"))
+        # One timestamp per turn, captured once (sip #79): epoch seconds, UTC,
+        # millisecond precision. The same value lands in the ring and the row.
+        ts = round(time.time(), 3)
+        row = json.dumps(
+            {"role": role, "text": text, "ts": ts}, ensure_ascii=False, separators=(",", ":")
+        )
         with _ACTIVE_LOCK:
             if self._finished:
                 _log.warning("Talk transcript turn arrived after capture finished and was dropped")
                 return
-            self._ring_append(role, text)
+            self._ring_append(role, text, ts)
             try:
                 if _safe_root(self._home, self._root) is None:
                     _log.warning("unsafe Talk transcript root was refused: %s", self._root)
@@ -321,8 +335,17 @@ class TranscriptCapture:
                 lease.close()
 
 
-def _read_turns(fd: int) -> list[dict[str, str]]:
-    turns = []
+def _row_ts(row: dict) -> float | None:
+    """A row's timestamp when it has a real one; historical rows have none (never invented)."""
+
+    ts = row.get("ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return None
+    return float(ts) if ts == ts and ts not in (float("inf"), float("-inf")) else None
+
+
+def _read_turns(fd: int) -> list[dict]:
+    turns: list[dict] = []
     os.lseek(fd, 0, os.SEEK_SET)
     with os.fdopen(os.dup(fd), encoding="utf-8", errors="replace") as stream:
         for line in stream:
@@ -337,7 +360,11 @@ def _read_turns(fd: int) -> list[dict[str, str]]:
                 continue
             text = row.get("text")
             if isinstance(text, str) and text.strip():
-                turns.append({"role": role, "text": text.strip()})
+                turn: dict = {"role": role, "text": text.strip()}
+                ts = _row_ts(row)
+                if ts is not None:
+                    turn["ts"] = ts
+                turns.append(turn)
     return turns
 
 
@@ -345,8 +372,12 @@ def _memory_prompt(turns: list[dict[str, str]]) -> str:
     # Escaping angle brackets means hostile text cannot forge a framing tag.
     # JSON quoting keeps newlines, quotes, and control characters inside the
     # text field instead of letting them become top-level prompt syntax.
+    # role/text only: timestamps are for audit and correlation (sip #79), not
+    # for the memory reviewer, whose prompt shape is unchanged.
     transcript = "\n".join(
-        json.dumps(turn, ensure_ascii=True).replace("<", "\\u003c").replace(">", "\\u003e")
+        json.dumps({"role": turn["role"], "text": turn["text"]}, ensure_ascii=True)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
         for turn in turns
     )
     return (

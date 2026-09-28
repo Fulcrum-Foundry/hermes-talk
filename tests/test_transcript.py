@@ -29,10 +29,65 @@ def test_capture_writes_one_closed_jsonl_row_per_completed_turn(tmp_path):
     capture.append_turn("assistant", "I will remember that")
 
     rows = [json.loads(line) for line in capture.path.read_text(encoding="utf-8").splitlines()]
-    assert rows == [
+    assert [{k: v for k, v in row.items() if k != "ts"} for row in rows] == [
         {"role": "user", "text": "ship on Friday"},
         {"role": "assistant", "text": "I will remember that"},
     ]
+    assert all(isinstance(row["ts"], float) for row in rows)
+
+
+def test_every_row_carries_the_same_timestamp_as_its_ring_turn(tmp_path, monkeypatch):
+    """sip #79: one timestamp per turn, captured once, in the ring and the durable row."""
+
+    clock = iter([1790630000.1234, 1790630001.5, 1790630003.25])
+    monkeypatch.setattr(talk_transcript.time, "time", lambda: next(clock))
+    capture = talk_transcript.TranscriptCapture(tmp_path)
+    capture.append_turn("user", "what's on today")
+    capture.append_turn("assistant", "two meetings")
+    capture.append_turn("user", "thanks")
+
+    rows = [json.loads(line) for line in capture.path.read_text(encoding="utf-8").splitlines()]
+    assert [row["ts"] for row in rows] == [1790630000.123, 1790630001.5, 1790630003.25]
+    assert [turn["ts"] for turn in capture.turns()] == [row["ts"] for row in rows]
+    assert [row["ts"] for row in rows] == sorted(row["ts"] for row in rows)
+
+
+def test_timestamps_are_ordered_across_real_turns(tmp_path):
+    capture = talk_transcript.TranscriptCapture(tmp_path)
+    for i in range(5):
+        capture.append_turn("user" if i % 2 == 0 else "assistant", f"turn {i}")
+    stamps = [
+        json.loads(line)["ts"] for line in capture.path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert stamps == sorted(stamps)
+    assert abs(stamps[-1] - time.time()) < 60
+
+
+def test_timestamp_free_rows_still_load_and_hand_off(tmp_path):
+    """Historical rows ({role, text} only) load unchanged; no timestamp is invented,
+    unknown extra fields are tolerated, and the memory prompt keeps its shape."""
+
+    capture = talk_transcript.TranscriptCapture(tmp_path)
+    capture.append_turn("user", _long_turn("deployment detail"))
+    capture.finish()
+    with capture.path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"role": "assistant", "text": _long_turn("old row")}) + "\n")
+        stream.write(
+            json.dumps({"role": "user", "text": "extra", "ts": "not a number", "x": 1}) + "\n"
+        )
+
+    fd = os.open(capture.path, os.O_RDONLY)
+    try:
+        turns = talk_transcript._read_turns(fd)
+    finally:
+        os.close(fd)
+    assert "ts" in turns[0] and "ts" not in turns[1] and "ts" not in turns[2]
+
+    prompts = []
+    talk_transcript.sweep_transcripts(tmp_path, run_agent=prompts.append)
+    assert len(prompts) == 1
+    assert "old row" in prompts[0]
+    assert '"ts"' not in prompts[0], "the memory reviewer sees role/text only"
 
 
 def test_capture_paths_are_unique_and_contained_even_for_hostile_session_ids(tmp_path):
