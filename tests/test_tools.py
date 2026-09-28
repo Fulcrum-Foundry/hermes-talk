@@ -886,3 +886,26 @@ def test_plugin_version_uses_loaded_source_before_stale_editable_metadata(
         (tmp_path / "plugin.yaml").write_text(manifest, encoding="utf-8")
     expected = "4.5.6" if manifest and "4.5.6" in manifest else "1.2.3"
     assert talk_tools.plugin_version() == expected
+
+
+def test_delegate_task_name_is_the_spoken_label(monkeypatch):
+    """Live sim: 'The Text me: Hey, we're on the phone right… work'. A short name the model
+    chooses ('your text') is what every later mention uses (sip #64)."""
+
+    seen: dict = {}
+
+    class _Host:
+        def run_agent(self, task, background=True, **kw):
+            seen.update(kw)
+            return "WORK_STARTED #1 kind=agent (x)"
+
+    monkeypatch.setattr(talk_host, "host", lambda: _Host())
+    talk_tools.execute_talk_tool(
+        "delegate_task", {"task": "Text me: hey, we're on the phone", "name": " your  text "}
+    )
+    assert seen["label"] == "your text"
+    import talk_cli
+
+    assert talk_cli.work_name({"label": "your text", "meta": {"named": True}}) == "Your text"
+    assert talk_cli.work_name({"label": "Text me: hey there"}) == "The Text me: hey there work"
+

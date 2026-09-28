@@ -401,7 +401,14 @@ def test_delegate_task_threads_the_declaration_into_the_host(monkeypatch):
 
     class _Host:
         def run_agent(
-            self, task, background=True, *, execution_mode=None, resource_keys=None, brief=None
+            self,
+            task,
+            background=True,
+            *,
+            execution_mode=None,
+            resource_keys=None,
+            brief=None,
+            label=None,
         ):
             seen.update(
                 task=task, background=background, mode=execution_mode, keys=resource_keys

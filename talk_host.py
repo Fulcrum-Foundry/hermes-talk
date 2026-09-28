@@ -727,7 +727,7 @@ def _api_server_worker(task: str, *, session_id: str | None) -> Any:
 TASK_META_CHARS = 2_000
 
 
-def _brief_meta(prompt: str) -> dict:
+def _brief_meta(prompt: str, *, named: bool = False) -> dict:
     """The delegated brief's version stamp and task text, recorded at acceptance.
 
     The result ledger (hermes-sip-live-voice#55) tells two same-label runs
@@ -739,7 +739,9 @@ def _brief_meta(prompt: str) -> dict:
     imports; nothing here is needed at import time.
     """
 
-    meta = {"task": str(prompt or "")[:TASK_META_CHARS]}
+    meta: dict = {"task": str(prompt or "")[:TASK_META_CHARS]}
+    if named:
+        meta["named"] = True  # the label is a spoken name the model chose (sip #64)
     try:
         try:
             from . import talk_results
@@ -1404,13 +1406,14 @@ class HostAdapter:
 
         if not talk_apiserver.is_available():
             return None
+        named = bool(label)
         label = label or _brief_label(prompt, brief)
         try:
             run_id = talk_runs.start_run(
                 "agent",
                 label,
                 _api_server_worker(prompt, session_id=None),
-                meta={**_brief_meta(prompt), **_envelope_meta(brief)},
+                meta={**_brief_meta(prompt, named=named), **_envelope_meta(brief)},
                 execution_mode=execution_mode,
                 resource_keys=resource_keys,
             )
@@ -1441,13 +1444,14 @@ class HostAdapter:
                 "attached to this call, the api server isn't reachable, and "
                 "there's no `hermes` command on the PATH to run one."
             )
+        named = bool(label)
         label = label or _brief_label(prompt, brief)
         try:
             run_id = talk_runs.start_run(
                 "agent",
                 label,
                 _detached_agent_worker(prompt, binary),
-                meta={**_brief_meta(prompt), **_envelope_meta(brief)},
+                meta={**_brief_meta(prompt, named=named), **_envelope_meta(brief)},
                 execution_mode=execution_mode,
                 resource_keys=resource_keys,
             )

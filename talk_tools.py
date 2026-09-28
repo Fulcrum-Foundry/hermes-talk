@@ -178,6 +178,14 @@ _TOOL_DELEGATE_TASK: dict = {
                     "Self-contained: no references back to this conversation."
                 ),
             },
+            "name": {
+                "type": "string",
+                "description": (
+                    "Two to four plain words naming the work the way you would say "
+                    "it aloud: 'the GBrain check', 'your text', 'the weather lookup'. "
+                    "Every later mention of this work uses this name."
+                ),
+            },
             "background": {
                 "type": "boolean",
                 "description": "Run without blocking the call (default true).",
@@ -821,12 +829,14 @@ def _handle_delegate_task(arguments: dict) -> str:
         question = resolution.question()
         if question:
             return f"I can't tell which target you mean. {question}"
+    name = " ".join(str(arguments.get("name") or "").split())[:60]
     return talk_host.host().run_agent(
         brief.render(),
         background is not False,
         execution_mode=mode,
         resource_keys=keys,
         brief=brief,
+        label=name or None,
     )
 
 

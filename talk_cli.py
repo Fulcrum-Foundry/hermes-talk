@@ -1115,7 +1115,12 @@ def work_name(run: dict | None) -> str:
     ``"The work you asked for"`` when there is no label at all.
     """
 
-    label = talk_brief.spoken_label((run or {}).get("label"))
+    raw = str((run or {}).get("label") or "").strip()
+    meta = (run or {}).get("meta") if isinstance((run or {}).get("meta"), dict) else {}
+    if raw and meta.get("named"):
+        # A name the model chose to say aloud ("the GBrain check"): used as is.
+        return raw[:1].upper() + raw[1:]
+    label = talk_brief.spoken_label(raw)
     return f"The {label} work" if label else "The work you asked for"
 
 
