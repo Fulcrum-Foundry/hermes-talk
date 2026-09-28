@@ -467,7 +467,7 @@ def test_delegate_task_needs_a_task():
 
 
 def test_check_work_on_an_empty_registry():
-    assert "Nothing is underway" in talk_tools.execute_talk_tool("check_work", {})
+    assert "Nothing is running" in talk_tools.execute_talk_tool("check_work", {})
 
 
 def test_check_work_lists_a_running_run():

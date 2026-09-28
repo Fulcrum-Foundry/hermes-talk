@@ -540,7 +540,7 @@ def test_no_spoken_string_from_the_scheduler_names_a_run_number():
     )
     for rid in (12, 11, 10):
         assert f"run {rid}" not in text and f"#{rid}" not in text
-    assert "triage" in text and "never by a run number" in text
+    assert "triage" in text and "never say the numbers aloud" in text
 
 
 def test_blockers_name_every_state_for_diagnostics():
