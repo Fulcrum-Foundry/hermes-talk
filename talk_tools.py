@@ -243,8 +243,12 @@ _TOOL_CHECK_WORK: dict = {
     "name": "check_work",
     "description": (
         "Check on background work you started. Call with no arguments when "
-        "asked how things are going; every finished run_id returned must then "
-        "be passed back in a specific call to retrieve that run's bounded output."
+        "asked how things are going: the result groups work as 'working' and "
+        "'ready, not yet shared' — results the operator has already heard are "
+        "not listed. You track what has been shared; never ask the caller which "
+        "one to open; volunteer unshared results at a pause, by their label, "
+        "never by run number. Every finished run_id returned must then be "
+        "passed back in a specific call to retrieve that run's bounded output."
     ),
     "parameters": {
         "type": "object",
@@ -288,8 +292,10 @@ _TOOL_STEER_AGENT: dict = {
         "sa-0-a1b2c3d4, from list_agents) or a run NUMBER from check_work: an "
         "api-server run gets the note queued into the same job, or queued for "
         "after its current step — the reply says which; say exactly that, "
-        "never 'applied'. Detached runs cannot be reached; offer stop_work. "
-        "This never cancels work."
+        "never 'applied'. A run that cannot be reached mid-flight is WIDENED "
+        "for you: it is restarted as the same one job with the original task "
+        "plus your note, and the reply says so — never start a second job for "
+        "the same request. This never abandons the operator's work."
     ),
     "parameters": {
         "type": "object",
@@ -558,6 +564,31 @@ _TOOL_DEFER_UPDATES: dict = {
     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
 }
 
+_TOOL_DELIVER_WHEN_DONE: dict = {
+    "type": "function",
+    "name": "deliver_when_done",
+    "description": (
+        "The operator wants to hear ONE background result the moment it lands "
+        "('tell me as soon as that's done', 'let me know when the audit "
+        "finishes'). The result is then spoken at the next natural pause with a "
+        "short transition and no 'now or later?' question, even if updates are "
+        "otherwise deferred. If it has already finished it goes out at the next "
+        "pause. Takes the run number from check_work or the WORK_STARTED "
+        "receipt; refer to the work by its label when you speak."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "run_id": {
+                "type": "integer",
+                "description": "The run number of the job to deliver as soon as it lands.",
+            },
+        },
+        "required": ["run_id"],
+        "additionalProperties": False,
+    },
+}
+
 _TOOL_GET_RESULT: dict = {
     "type": "function",
     "name": "get_result",
@@ -643,6 +674,7 @@ def default_talk_tools(*, pausable: bool = False) -> list[dict]:
         _TOOL_CANCEL_JOB,
         _TOOL_SET_VERBOSITY,
         _TOOL_DEFER_UPDATES,
+        _TOOL_DELIVER_WHEN_DONE,
         _TOOL_GET_RESULT,
     ]
     if pausable:
@@ -853,13 +885,26 @@ def _handle_check_work(arguments: dict) -> str:
     # include_history so a run from a PREVIOUS session surfaces as `lost`
     # rather than vanishing — this process cannot see a detached child it
     # never spawned, and saying nothing would read as "nothing is running".
-    runs = talk_runs.list_runs(limit=10, include_history=True)
-    lines = "; ".join(_describe_run(run) for run in runs) if runs else ""
-    finished = [
-        int(run["runId"])
-        for run in runs
-        if run.get("status") in talk_runs.TERMINAL_STATUSES and isinstance(run.get("runId"), int)
+    # Results already SHARED — delivered, or claimed by an earlier call — are
+    # not listed (#71): a live handset review heard "older finished runs 12,
+    # 11, 10, probably unrelated — which do you want?" on every check. Talk
+    # tracks what has been shared; the caller never manages a queue.
+    runs = [
+        run
+        for run in talk_runs.list_runs(limit=10, include_history=True)
+        if not talk_runs.shared_with_caller(run) and not talk_runs.replaced(run)
     ]
+    working = [run for run in runs if run.get("status") not in talk_runs.TERMINAL_STATUSES]
+    ready = [run for run in runs if run.get("status") in talk_runs.TERMINAL_STATUSES]
+    groups: list[str] = []
+    if working:
+        groups.append("Working: " + "; ".join(_describe_run(run) for run in working))
+    if ready:
+        groups.append(
+            "Ready, not yet shared: " + "; ".join(_describe_run(run) for run in ready)
+        )
+    lines = ". ".join(groups)
+    finished = [int(run["runId"]) for run in ready if isinstance(run.get("runId"), int)]
     if lines and finished:
         retrieval = "; ".join(
             f"call check_work with run_id {run_id} for that run's bounded output"
@@ -878,7 +923,7 @@ def _handle_check_work(arguments: dict) -> str:
         return notes
     if lines:
         return lines
-    return "Nothing is running and nothing recent has finished."
+    return "Nothing is running and nothing finished is waiting to be shared."
 
 
 def _handle_list_agents(arguments: dict) -> str:
@@ -892,6 +937,9 @@ def _handle_steer_agent(arguments: dict) -> str:
     text = str(arguments.get("text") or "").strip()
     if not text:
         return "steer_agent needs the note itself."
+    # Steer by replace (#72) lives in the host adapter: a run number with no
+    # steering channel is cancelled and restarted wider, never refused in a
+    # way that invites a duplicate job.
     return talk_host.host().steer_agent(agent_id, text)
 
 
@@ -987,10 +1035,15 @@ def _handle_resume(arguments: dict) -> str:
     if scheduler is not None and changed:
         scheduler.rearm()
     if ready:
-        listing = ", ".join(str(rid) for rid in ready)
+        labels = []
+        for rid in ready:
+            run = talk_runs.get_run(rid) or {}
+            labels.append(str(run.get("label") or "").strip() or "a background job")
+        listing = ", ".join(labels)
         return (
-            f"Resumed. Background results are ready for run(s) {listing} — offer "
-            "them in one short sentence; use get_result or check_work to read one."
+            f"Resumed. Background results are ready: {listing} — offer them in one "
+            "short sentence by name, never by number; use get_result or check_work "
+            "to read one."
         )
     return "Resumed." if changed else "Nothing was on hold; carry on."
 
@@ -1025,6 +1078,31 @@ def _handle_set_verbosity(arguments: dict) -> str:
             "two sentences. Requested reports and briefs stay complete."
         )
     return "Detailed mode for the rest of this call: fuller spoken explanations are welcome."
+
+
+def _handle_deliver_when_done(arguments: dict) -> str:
+    try:
+        run_id = int(arguments.get("run_id"))
+    except (TypeError, ValueError):
+        return "deliver_when_done needs the run number of the job to deliver."
+    run = talk_runs.get_run(run_id)
+    if run is None:
+        return f"I don't have a run number {run_id} in this session."
+    label = str(run.get("label") or "").strip() or "that job"
+    if not talk_controls.snapshot()["attached"] or talk_announce.current() is None:
+        return "No live voice session is attached, so there is nothing to deliver into."
+    ready = talk_announce.deliver_when_done(run_id)
+    if ready:
+        return (
+            f"{label} has already finished — it will be spoken at the next pause. "
+            "Say nothing more about it now."
+        )
+    if run.get("status") in talk_runs.TERMINAL_STATUSES:
+        return f"{label} has already finished and been shared; use get_result to read it again."
+    return (
+        f"Noted: {label} will be spoken as soon as it lands, at the next pause. "
+        "Confirm in a few words, by its name, not its number."
+    )
 
 
 def _handle_defer_updates(arguments: dict) -> str:
@@ -1265,6 +1343,7 @@ _HANDLERS = {
     "cancel_job": _handle_cancel_job,
     "set_verbosity": _handle_set_verbosity,
     "defer_updates": _handle_defer_updates,
+    "deliver_when_done": _handle_deliver_when_done,
     "get_result": _handle_get_result,
 }
 

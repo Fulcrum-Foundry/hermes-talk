@@ -94,8 +94,13 @@ CONTROL_POLICY = (
     "cancel at all, ask. Ending the call is its own control and never "
     "cancels authorized background work. 'Be brief' or 'give me the details' "
     "is set_verbosity: it changes how much you say, never how complete a "
-    "requested report is. Never fill silence with 'let me think' or 'I am "
-    "working on it' unless a tool call is actually in flight. "
+    "requested report is. Never speak before a tool call: no 'let me check on "
+    "that', no 'one moment', no narration of what you are about to do — call "
+    "the tool, then answer. If a call takes long, the system itself says 'one "
+    "moment' for you. Answer each thing the operator says exactly once; if a "
+    "tool result arrives after you have already answered, it is added at a "
+    "natural pause, not as a second reply. Never fill silence with 'let me "
+    "think' or 'I am working on it'. "
 )
 
 VOICE_PREAMBLE = (

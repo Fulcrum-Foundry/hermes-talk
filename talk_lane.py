@@ -29,6 +29,9 @@ from typing import Any
 #: visible marker so a diagnostics read can tell the pack was cut.
 INSTRUCTIONS_CAP = 6_000
 TRUNCATION_MARKER = "\n[operating pack truncated at cap]"
+#: Seconds a tool call may run in silence before Talk speaks one short filler
+#: (#69). Lives here, not in talk_cli, so the policy default can name it.
+FILLER_AFTER_S = 1.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +58,14 @@ class LanePolicy:
         coalesced notice at a natural pause; routine speech is suppressed
         while the caller speaks, during hold, after "later", and once the
         call is closing. Approval questions are never deferred past the pause.
+        ``"immediate_segue"`` (#68) gates the same way but SPEAKS each result
+        at the next pause with a short transition and no "now or later?"
+        question; "later" still parks.
+    ``filler_after_s``: how long a tool call may run in silence before Talk
+        itself speaks one short filler ("Give me a second.") (#69). Default
+        :data:`FILLER_AFTER_S`; ``None`` disables the filler for this lane.
+        The model never speaks before a tool call; only Talk fills a wait
+        that is actually long.
     ``verbosity``: the lane's default spoken depth (``"concise"`` /
         ``"detailed"``), or ``None`` for the preamble's own default. The
         caller can flip it per session with ``set_verbosity`` (#57).
@@ -87,6 +98,7 @@ class LanePolicy:
     handlers: dict[str, Callable[[dict], Any]] = field(default_factory=dict)
     on_end_call: Callable[[], Any] | None = None
     announcements: str = "immediate"
+    filler_after_s: float | None = FILLER_AFTER_S
     verbosity: str | None = None
     manifest: dict[str, Any] = field(default_factory=dict)
     binding_key: str | None = None
@@ -122,6 +134,7 @@ class LanePolicy:
             "spoken_heartbeats": self.spoken_heartbeats,
             "memory_review": self.memory_review,
             "announcements": self.announcements,
+            "filler_after_s": self.filler_after_s,
             "verbosity": self.verbosity,
             "binding": bool(self.binding_key),
             "after_call": self.after_call,
@@ -139,4 +152,4 @@ def coerce(policy: LanePolicy | None, lane: str | None) -> LanePolicy:
     return LanePolicy(name=str(lane or "cli"))
 
 
-__all__ = ["INSTRUCTIONS_CAP", "TRUNCATION_MARKER", "LanePolicy", "coerce"]
+__all__ = ["FILLER_AFTER_S", "INSTRUCTIONS_CAP", "TRUNCATION_MARKER", "LanePolicy", "coerce"]

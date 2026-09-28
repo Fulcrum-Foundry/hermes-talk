@@ -178,6 +178,7 @@ def test_mint_advertises_the_full_tool_surface(minted, monkeypatch):
         "cancel_job",
         "set_verbosity",
         "defer_updates",
+        "deliver_when_done",
         "get_result",
     ]
     assert minted["session"]["tool_choice"] == "auto"

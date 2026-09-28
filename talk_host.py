@@ -91,6 +91,21 @@ STOP_CONFIRM_WAIT_S = 1.5
 #: lands in the run's meta whenever it resolves.
 STOP_LATE_CONFIRM_S = 30.0
 
+#: How long :meth:`HostAdapter.widen_run` waits for a cancelled original to
+#: release its resource keys before giving up on the replacement (#72).
+WIDEN_RELEASE_WAIT_S = 2.0
+WIDEN_RELEASE_POLL_S = 0.05
+
+#: :meth:`HostAdapter.stop_work` replies that mean the stop WENT OUT (the run
+#: is winding down or already dead); anything else is a refusal.
+_STOP_ACCEPTED_PREFIXES = ("Sent the stop", "Sending the stop", "Stopped run")
+
+#: How the widened ask is composed from the original task and the correction.
+WIDEN_TEMPLATE = (
+    "{task}\n\nThe operator added this direction while the work was running; it "
+    "applies on top of the task above:\n{steer}"
+)
+
 
 def _spawn_daemon(fn, *args, name: str = "talk-stop") -> None:
     """Fire-and-forget worker. DAEMON by design: a stop confirmation (or a
@@ -707,24 +722,33 @@ def _api_server_worker(task: str, *, session_id: str | None) -> Any:
     return worker
 
 
+#: How much of the delegated task rides the run record (``meta.task``), so a
+#: steer that cannot reach the run can be replaced by a WIDENED one (#72).
+TASK_META_CHARS = 2_000
+
+
 def _brief_meta(prompt: str) -> dict:
-    """The delegated brief's version stamp, recorded at acceptance.
+    """The delegated brief's version stamp and task text, recorded at acceptance.
 
     The result ledger (hermes-sip-live-voice#55) tells two same-label runs
     apart by the hash of the brief they were given, and that hash has to be
     minted BEFORE the run so a record written at the terminal transition
-    carries it. Lazy import: talk_results imports talk_runs, which this module
-    already imports; nothing here is needed at import time.
+    carries it. The task text itself (bounded) is what :meth:`widen_run`
+    restarts from when a correction cannot reach the running job. Lazy
+    import: talk_results imports talk_runs, which this module already
+    imports; nothing here is needed at import time.
     """
 
+    meta = {"task": str(prompt or "")[:TASK_META_CHARS]}
     try:
         try:
             from . import talk_results
         except ImportError:  # pragma: no cover - flat-module fallback
             import talk_results
-        return {"brief_version": talk_results.brief_version(prompt)}
+        meta["brief_version"] = talk_results.brief_version(prompt)
     except Exception:  # noqa: BLE001 — a missing stamp, never a refused run
-        return {}
+        pass
+    return meta
 
 
 def _sources_used(output: str) -> str:
@@ -1287,6 +1311,7 @@ class HostAdapter:
         execution_mode: str | None = None,
         resource_keys: Any = None,
         brief: Any = None,
+        label: str | None = None,
     ) -> str:
         """Hand a self-contained task to a background Hermes agent.
 
@@ -1316,6 +1341,9 @@ class HostAdapter:
         plugin does not own: it is still checked against the keys the run
         registry holds — never started on top of one — but it holds none
         itself afterwards, and the receipt says so.
+
+        ``label`` overrides the spoken label (a replacement keeps its
+        predecessor's name, #72); default is the brief's goal or prompt head.
         """
 
         ctx = get_ctx()
@@ -1342,12 +1370,20 @@ class HostAdapter:
                 return started
 
         via_api_server = self._run_api_server_agent(
-            prompt, execution_mode=execution_mode, resource_keys=resource_keys, brief=brief
+            prompt,
+            execution_mode=execution_mode,
+            resource_keys=resource_keys,
+            brief=brief,
+            label=label,
         )
         if via_api_server is not None:
             return via_api_server
         return self._run_detached_agent(
-            prompt, execution_mode=execution_mode, resource_keys=resource_keys, brief=brief
+            prompt,
+            execution_mode=execution_mode,
+            resource_keys=resource_keys,
+            brief=brief,
+            label=label,
         )
 
     def _run_api_server_agent(
@@ -1357,6 +1393,7 @@ class HostAdapter:
         execution_mode: str | None = None,
         resource_keys: Any = None,
         brief: Any = None,
+        label: str | None = None,
     ) -> str | None:
         """Tier 2: run the task on a real agent over the api_server.
 
@@ -1366,7 +1403,7 @@ class HostAdapter:
 
         if not talk_apiserver.is_available():
             return None
-        label = _brief_label(prompt, brief)
+        label = label or _brief_label(prompt, brief)
         try:
             run_id = talk_runs.start_run(
                 "agent",
@@ -1392,6 +1429,7 @@ class HostAdapter:
         execution_mode: str | None = None,
         resource_keys: Any = None,
         brief: Any = None,
+        label: str | None = None,
     ) -> str:
         """Tier 3/4: run the task as a detached ``hermes -z`` one-shot."""
 
@@ -1402,7 +1440,7 @@ class HostAdapter:
                 "attached to this call, the api server isn't reachable, and "
                 "there's no `hermes` command on the PATH to run one."
             )
-        label = _brief_label(prompt, brief)
+        label = label or _brief_label(prompt, brief)
         try:
             run_id = talk_runs.start_run(
                 "agent",
@@ -1747,6 +1785,10 @@ class HostAdapter:
                 doing = f", running {last_tool}" if last_tool else ""
                 lines.append(f"{sid} — {goal}{age}{doing} (can steer or stop)")
         for run in talk_runs.list_runs(limit=8, include_history=True):
+            if talk_runs.shared_with_caller(run) or talk_runs.replaced(run):
+                # Already heard, or superseded by a widened restart (#71/#72):
+                # not a choice to put in front of the caller.
+                continue
             meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
             lane = meta.get("lane")
             status = run.get("status")
@@ -1916,6 +1958,70 @@ class HostAdapter:
             "and any note it hadn't read is dropped."
         )
 
+    def widen_run(self, run: dict, text: str) -> str:
+        """Steer by REPLACE: cancel an unsteerable run and restart it wider (#72).
+
+        A live handset review saw the refusal ("I can't pass it notes — want
+        me to stop and restart?") answered by the model starting a SECOND job
+        with the same scope. So the plugin does the honest thing itself: the
+        original is stopped, one replacement starts with the original task
+        plus the correction, under the original's label and admission
+        declaration, and the reply says the work was widened. One job, one
+        result. The original's own outcome is never announced: it is marked
+        ``replaced_by`` and the watcher consumes it silently.
+        """
+
+        text = (text or "").strip()
+        if not text:
+            return "I need the correction itself before I can widen the work."
+        run_id = int(run["runId"])
+        label = str(run.get("label") or "").strip() or "that job"
+        meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
+        task = str(meta.get("task") or "").strip() or label
+        widened = WIDEN_TEMPLATE.format(task=task, steer=text)
+        admission = run.get("admission") if isinstance(run.get("admission"), dict) else {}
+        mode = admission.get("mode")
+        keys = tuple(k for k in admission.get("keys") or () if isinstance(k, str))
+
+        # Mark BEFORE the stop so the terminal transition already sees it: the
+        # watcher must never speak "label was cancelled" for a job the caller
+        # only asked to widen.
+        talk_runs.annotate_run(run_id, tee=True, replacing=True, replaced_reason=text[:200])
+        stop = self.stop_work(str(run_id), "replaced with a widened scope")
+        if not stop.startswith(_STOP_ACCEPTED_PREFIXES):
+            talk_runs.annotate_run(run_id, tee=True, replacing=False, replaced_reason=None)
+            return (
+                f"I couldn't widen {label} yet — {stop} It is still the one job; ask "
+                "again in a moment. Do not start another job for this."
+            )
+
+        receipt = None
+        deadline = time.monotonic() + WIDEN_RELEASE_WAIT_S
+        while True:
+            receipt = self.run_agent(
+                widened, execution_mode=mode, resource_keys=keys or None, label=label
+            )
+            still_held = "can't start that yet" in receipt and keys
+            if not still_held or time.monotonic() >= deadline:
+                break
+            time.sleep(WIDEN_RELEASE_POLL_S)
+        new_id = talk_runs.run_id_from_receipt(receipt)
+        if new_id is None:
+            # The stop went out and the original will end as cancelled; with
+            # no replacement that outcome IS the news, so un-mark it.
+            talk_runs.annotate_run(run_id, tee=True, replacing=False)
+            return (
+                f"I stopped {label} but couldn't start the wider version: {receipt} "
+                "Say that plainly; do not start another job on your own."
+            )
+        talk_runs.annotate_run(run_id, tee=True, replaced_by=new_id)
+        talk_runs.annotate_run(new_id, replaces=run_id)
+        return (
+            f"{receipt} — {label} has been widened to include that; it is one job "
+            "now, restarted with the new scope. Say the work was widened, by its "
+            "name; do not start another job for the same request."
+        )
+
 
 _HOST = HostAdapter()
 
@@ -2006,20 +2112,39 @@ def _steer_registry_run(run: dict, text: str, *, mode: str) -> str:
     stop-and-restart offer.
     """
 
-    meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
-    if (
-        meta.get("lane") != LANE_API_SERVER
-        or run.get("status") in talk_runs.TERMINAL_STATUSES
-        or not meta.get("api_run_id")
-    ):
-        # No channel yet (the remote id has not landed) or none at all: the
-        # honest pre-0.24 answer, with its REAL stop offer.
+    if run.get("status") in talk_runs.TERMINAL_STATUSES:
         return _unsteerable_run(run)
+    if unsteerable(run):
+        # No channel yet (the remote id has not landed) or none at all. The
+        # pre-0.25 answer was a refusal plus "want me to stop and restart?",
+        # which the model answered by starting a DUPLICATE job (#72). Now the
+        # plugin replaces the run itself: cancel, restart wider, one job.
+        return host().widen_run(run, text)
     try:
-        spoken, _receipt = talk_api_steer.steer(run, text, mode=mode)
+        spoken, receipt = talk_api_steer.steer(run, text, mode=mode)
     except Exception as exc:  # noqa: BLE001 — the model speaks the failure
         return f"I couldn't get that through: {type(exc).__name__}: {exc}"
+    if receipt.get("state") == talk_api_steer.REFUSED and receipt.get("evidence") in (
+        "wrong_lane",
+        "no_api_run_id",
+    ):
+        return host().widen_run(run, text)
     return spoken
+
+
+def unsteerable(run: dict | None) -> bool:
+    """Whether this LIVE registry run has no steering channel at all (#72).
+
+    True for a detached one-shot, and for an api-server run whose remote id
+    has not landed yet. A finished run is not "unsteerable" — there is nothing
+    left to widen — and neither is a run with a channel that merely refuses a
+    particular note.
+    """
+
+    if not isinstance(run, dict) or run.get("status") in talk_runs.TERMINAL_STATUSES:
+        return False
+    meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
+    return meta.get("lane") != LANE_API_SERVER or not meta.get("api_run_id")
 
 
 def _unsteerable_run(run: dict) -> str:

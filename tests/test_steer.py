@@ -118,24 +118,28 @@ def test_tool_layer_requires_agent_id_and_text():
 # -- run numbers: lanes that cannot steer -------------------------------------
 
 
-def test_api_server_run_without_a_remote_id_yet_refuses_and_offers_a_real_stop():
+def test_api_server_run_without_a_remote_id_yet_cannot_be_widened_and_says_one_job():
     # Once the remote id lands the run is steerable (tests/test_api_steer.py);
-    # before that there is no channel and the stop offer is the honest answer.
+    # before that there is no channel AND no stop handle, so the widen (#72)
+    # cannot happen yet — the reply keeps it one job and forbids a duplicate.
     run_id, hung = _running_run(talk_host.LANE_API_SERVER)
     try:
         out = talk_host.host().steer_agent(str(run_id), "focus on pricing")
     finally:
         hung.set()
-    assert "api server" in out.lower() and "stopping it" in out.lower()
+    assert "couldn't widen" in out.lower()
+    assert "do not start another job" in out.lower()
+    assert talk_runs.get_run(run_id)["status"] == "running"
 
 
-def test_detached_run_refuses_and_offers_a_real_stop():
+def test_detached_run_without_a_process_handle_cannot_be_widened(monkeypatch):
+    monkeypatch.setattr(talk_host, "hermes_binary", lambda: None)
     run_id, hung = _running_run()
     try:
         out = talk_host.host().steer_agent(str(run_id), "focus on pricing")
     finally:
         hung.set()
-    assert "detached" in out.lower() and "stopping it" in out.lower()
+    assert "couldn't widen" in out.lower() and "one job" in out.lower()
 
 
 def test_finished_run_says_finished():
@@ -575,13 +579,13 @@ def test_redirect_empty_text_is_refused():
     assert "the correction itself" in out.lower()
 
 
-def test_redirect_run_number_refuses_with_lane_wording():
+def test_redirect_run_number_without_a_channel_widens_or_says_so():
     run_id, hung = _running_run(talk_host.LANE_API_SERVER)
     try:
         out = talk_host.host().redirect_agent(str(run_id), "wrong repo")
     finally:
         hung.set()
-    assert "api server" in out.lower()
+    assert "widen" in out.lower() and "do not start another job" in out.lower()
 
 
 def test_redirect_without_host_module_refuses(monkeypatch):
@@ -734,4 +738,4 @@ def test_steer_agent_description_forbids_delivery_claims():
     )
     text = schema["description"].lower()
     assert "queued, not delivered" in text
-    assert "never cancels" in text
+    assert "never start a second job" in text

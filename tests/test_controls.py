@@ -73,7 +73,8 @@ def test_resume_leaves_hold_and_lifts_a_deferral_and_names_ready_results():
     out = talk_tools.execute_talk_tool("resume", {})
     assert not talk_controls.is_holding()
     assert not talk_controls.is_topic_deferred()
-    assert "run(s) 7" in out
+    assert "ready:" in out.lower() and "by name, never by number" in out
+    assert "7" not in out, "the caller hears labels, never run numbers"
     scheduler.release_all()
     assert talk_tools.execute_talk_tool("resume", {}) == "Nothing was on hold; carry on."
 
