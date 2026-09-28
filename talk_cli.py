@@ -55,6 +55,7 @@ try:
         talk_delivery,
         talk_diagnostics,
         talk_doctor,
+        talk_filler,
         talk_gemini_realtime,
         talk_grok_auth,
         talk_grok_realtime,
@@ -92,6 +93,7 @@ except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path
     import talk_delivery
     import talk_diagnostics
     import talk_doctor
+    import talk_filler
     import talk_gemini_realtime
     import talk_grok_auth
     import talk_grok_realtime
@@ -368,7 +370,15 @@ class ToolResponseCoordinator:
     """
 
     def __init__(
-        self, relay, send_batch, *, max_pending: int, provider_neutral: bool = False
+        self,
+        relay,
+        send_batch,
+        *,
+        max_pending: int,
+        provider_neutral: bool = False,
+        filler=None,
+        reply_ledger=None,
+        on_late_reply=None,
     ) -> None:
         self.relay = relay
         self.send_batch = send_batch
@@ -385,6 +395,17 @@ class ToolResponseCoordinator:
         self._stopped = asyncio.Event()
         self._continuation = self._default_continuation()
         self._flush_lock = asyncio.Lock()
+        #: Filler only when waiting (#69): ``filler`` is a
+        #: :class:`talk_filler.FillerTimer`, armed when a call is admitted and
+        #: disarmed when its result is in. ``reply_ledger`` is the
+        #: :class:`talk_filler.ReplyLedger`; when the response that made the
+        #: call already spoke a reply, ``on_late_reply(turn_id, continuation)``
+        #: takes the follow-up (an announcement at a pause) instead of a second
+        #: immediate reply. All three ``None`` = the pre-0.25 coordinator.
+        self.filler = filler
+        self.reply_ledger = reply_ledger
+        self.on_late_reply = on_late_reply
+        self._turn_key: object = None
 
     def _default_continuation(self):
         return (
@@ -408,6 +429,12 @@ class ToolResponseCoordinator:
             raise RuntimeError("tool call arrived after response.done")
         position = len(self.outputs)
         self.outputs.append(None)
+        if position == 0:
+            # The turn this batch answers: the provider's response id when it
+            # gave one, else a key private to this batch.
+            self._turn_key = event.get("response_id") or object()
+        if self.filler is not None:
+            self.filler.tool_started(self._turn_key)
         candidate = event.get(talk_operator_auth.TRUSTED_CONTINUATION_EVENT_KEY)
         candidate = candidate if isinstance(candidate, dict) else {"type": "response.create"}
         if self.provider_neutral:
@@ -467,12 +494,27 @@ class ToolResponseCoordinator:
             ):
                 return
             batch = [message for result in self.outputs for message in result or []]
-            batch.append(self._continuation)
+            turn = self._turn_key
+            if self.filler is not None:
+                self.filler.tool_finished(turn)
+                # A filler already on the wire finishes before the answer.
+                await self.filler.settle(turn)
+            late = (
+                self.reply_ledger is not None
+                and self.on_late_reply is not None
+                and self.reply_ledger.replied(turn)
+            )
+            if not late:
+                batch.append(self._continuation)
             try:
                 await self.send_batch(batch)
             except Exception:
                 self.failed = True
                 raise
+            if late:
+                # The turn was already answered: the follow-up is spoken at a
+                # pause, never as a second immediate reply (#69).
+                self.on_late_reply(turn, self._continuation)
             self.outputs = []
             self.closed = False
             self._continuation = self._default_continuation()
@@ -520,6 +562,8 @@ class ToolResponseCoordinator:
     async def stop(self) -> None:
         """Discard queued calls, stop after the active call settles, and acknowledge."""
 
+        if self.filler is not None:
+            self.filler.cancel()
         if not self._stop_requested:
             self._stop_requested = True
             if not self._stopped.is_set():
@@ -835,18 +879,29 @@ async def _next_batch(announce_queue, scheduler, busy):
     approval or spoken over the caller (hermes-sip-live-voice#51).
     """
 
-    if scheduler is None or not scheduler.deferred:
+    if scheduler is None or not scheduler.gated:
         return await announce_queue.get()
     while True:
         try:
             return await asyncio.wait_for(announce_queue.get(), ANNOUNCE_NOTICE_POLL_S)
         except TimeoutError:
             pass
-        if (
-            scheduler.pending_notice()
-            and not busy()
-            and scheduler.may_speak(talk_announce.KIND_ROUTINE)
-        ):
+        if busy() or not scheduler.may_speak(talk_announce.KIND_ROUTINE):
+            continue
+        if scheduler.pending_segue():
+            # A result the caller hears in full at this pause, with a segue and
+            # no question (#68): one per batch, so a second one waits for the
+            # next pause rather than riding the same breath.
+            due = scheduler.segue_commands()
+            if due is not None:
+                run_id, commands = due
+                return QueuedAnnouncement(
+                    commands,
+                    scheduler.notice_on_sent(run_id),
+                    kind=talk_announce.KIND_ROUTINE,
+                    run_id=run_id,
+                )
+        if scheduler.pending_notice():
             commands = scheduler.notice_commands()
             if commands:
                 return QueuedAnnouncement(
@@ -887,10 +942,13 @@ async def pump_announcements(
     ``scheduler`` (:class:`talk_announce.Scheduler`) is the conversation-state
     half of the gate (hermes-sip-live-voice#51). ``None`` — every caller
     before 0.23 — is the immediate policy: this loop behaves exactly as it
-    did. With a deferred scheduler, routine batches also wait for the caller
-    to stop speaking / hold / closing / "later"; completions are parked as
-    ready records and ONE coalesced notice is emitted at a natural pause;
-    progress notices are revalidated against the run right before speech.
+    did. With a gated scheduler (deferred / immediate_segue), routine batches
+    also wait for the caller to stop speaking / hold / closing / "later";
+    completions are parked as ready records and, at a natural pause, either
+    ONE coalesced notice offers them (deferred) or each is spoken with a short
+    segue and no question (immediate_segue, or a run marked
+    ``deliver_when_done``; #68); progress notices are revalidated against the
+    run right before speech.
     """
 
     def busy() -> bool:
@@ -904,10 +962,11 @@ async def pump_announcements(
             )
         else:
             batch, on_sent, kind, run_id = queued, None, talk_announce.KIND_ROUTINE, None
-        if scheduler is not None and scheduler.deferred:
+        if scheduler is not None and scheduler.gated:
             if kind == talk_announce.KIND_COMPLETION and run_id is not None:
                 # A completion is a READY RECORD, not speech: parked until the
-                # caller asks or a natural pause offers it (coalesced).
+                # caller asks or a natural pause offers it (coalesced) — or,
+                # under immediate_segue / deliver_when_done, speaks it (#68).
                 scheduler.park_completion(run_id, batch, on_sent)
                 continue
             if not scheduler.still_valid(kind, run_id):
@@ -970,6 +1029,30 @@ async def pump_announcements(
                     # monitored pump fail so the supervisor tears down the call.
                     raise
                 break
+
+
+def late_reply_commands() -> list[talk_realtime.RealtimeCommand]:
+    """The follow-up for a turn that was already answered (#69).
+
+    The tool result is in the conversation; this nudge makes the model give
+    the outcome in one breath at a pause — not a second full reply to the
+    question it already answered.
+    """
+
+    return _notice_commands(
+        "Natural pause: the tool call from your last answer has returned and its "
+        "result is in the conversation above. If it changes or completes what you "
+        "already said, add it in one short sentence; if it adds nothing, say nothing."
+    )
+
+
+def _notice_commands(headline: str) -> list[talk_realtime.RealtimeCommand]:
+    item_id = f"talkann{uuid.uuid4().hex[:20]}"
+    return [
+        talk_realtime.AddContext(item_id=item_id, text=headline),
+        talk_realtime.StartResponse(allow_tools=False),
+        talk_realtime.RemoveContext(item_id=item_id),
+    ]
 
 
 def landed_note_messages(subagent_id: str) -> list[dict]:
@@ -2241,6 +2324,13 @@ async def run_talk_session(
                 if run is None:
                     return
                 if run["status"] in talk_runs.TERMINAL_STATUSES:
+                    if talk_runs.replaced(run):
+                        # Steered by replace (#72): the widened successor
+                        # carries the request; this outcome is consumed
+                        # silently so "label was cancelled" is never spoken.
+                        if talk_runs.claim_delivery(run_id, claimant=talk_session_id):
+                            _delivered(run_id)
+                        return
                     # Two-phase: CLAIM first — losing means another route
                     # already owns this result, and saying it twice is worse
                     # than not saying it at all. The delivered flip happens
@@ -2283,6 +2373,22 @@ async def run_talk_session(
                             )
                         )
 
+        # Filler only when waiting, one reply per turn (#69). The timer sends
+        # through the announcement gate (declined while a response is open) so
+        # "one moment" never lands over the answer; a late tool result for an
+        # already-answered turn becomes a routine announcement at a pause.
+        reply_ledger = talk_filler.ReplyLedger()
+        filler_timer = talk_filler.FillerTimer(
+            lambda commands: send_outgoing(commands, is_announcement=True),
+            after_s=policy.filler_after_s,
+            busy=lambda: bool(relay.response_active or continuation_pending or speaker_busy()),
+        )
+
+        def on_late_reply(_turn, _continuation) -> None:
+            announce_queue.put_nowait(
+                QueuedAnnouncement(late_reply_commands(), kind=talk_announce.KIND_ROUTINE)
+            )
+
         tool_coordinator = ToolResponseCoordinator(
             (
                 HostExecutionRelay(
@@ -2305,6 +2411,9 @@ async def run_talk_session(
             send_outgoing,
             max_pending=TOOL_SESSION_QUEUE_SIZE,
             provider_neutral=True,
+            filler=filler_timer,
+            reply_ledger=reply_ledger,
+            on_late_reply=on_late_reply,
         )
 
         async def receive_events() -> None:
@@ -2371,6 +2480,14 @@ async def run_talk_session(
                     talk_controls.note_caller_speaking(False)
                 if isinstance(event, talk_realtime.ResponseStarted):
                     continuation_pending = False
+                    reply_ledger.note_started(event.response_id, dict(event.metadata))
+                elif isinstance(event, talk_realtime.OutputAudio) or (
+                    isinstance(event, talk_realtime.Transcript)
+                    and event.provenance is talk_realtime.TranscriptProvenance.OUTPUT_AUDIO
+                    and event.final
+                    and event.text.strip()
+                ):
+                    reply_ledger.note_spoke(event.response_id)
                 if isinstance(event, talk_realtime.FunctionCall):
                     tool_event = {
                         "call_id": event.call_id,
@@ -2605,7 +2722,7 @@ async def run_talk_session(
         # with a positional double keep working.
         scheduler = talk_announce.Scheduler(policy.announcements, answer_pending=answer_pending)
         talk_announce.attach_session(scheduler)
-        pump_extra = {"scheduler": scheduler} if scheduler.deferred else {}
+        pump_extra = {"scheduler": scheduler} if scheduler.gated else {}
         sender = asyncio.create_task(send_microphone())
         pump = asyncio.create_task(
             pump_announcements(

@@ -74,6 +74,7 @@ _BASE_TOOLS = [
     "cancel_job",
     "set_verbosity",
     "defer_updates",
+    "deliver_when_done",
     "get_result",
 ]
 
@@ -527,6 +528,211 @@ def test_check_work_by_unknown_id():
 
 def test_check_work_rejects_a_non_numeric_id():
     assert "needs a run number" in talk_tools.execute_talk_tool("check_work", {"run_id": "soon"})
+
+
+# -- #71: hide delivered and prior-call work -------------------------------------
+
+
+def test_check_work_groups_working_and_ready_not_yet_shared():
+    gate = threading.Event()
+    running = talk_runs.start_run("agent", "audit the site", lambda _rid: gate.wait(3) or "ok")
+    finished = talk_runs.start_run("agent", "triage", lambda _rid: "all clear")
+    _wait_terminal(finished)
+    try:
+        result = talk_tools.execute_talk_tool("check_work", {})
+    finally:
+        gate.set()
+    assert result.startswith("Working: ")
+    assert "Ready, not yet shared: " in result
+    assert f"run {running} (agent) running" in result
+    assert f"run {finished} (agent) finished" in result
+
+
+def test_check_work_hides_a_result_already_delivered_to_the_caller():
+    run_id = talk_runs.start_run("agent", "triage", lambda _rid: "all clear")
+    _wait_terminal(run_id)
+    assert talk_runs.claim_delivery(run_id, claimant="ts-test")
+    assert talk_runs.mark_delivered(run_id, claimant="ts-test")
+
+    result = talk_tools.execute_talk_tool("check_work", {})
+
+    assert f"run {run_id}" not in result
+    assert "waiting to be shared" in result
+    # Asked for by number it is still readable — hiding is about the listing.
+    assert "all clear" in talk_tools.execute_talk_tool("check_work", {"run_id": run_id})
+
+
+def test_check_work_hides_a_result_claimed_by_an_earlier_call_but_lists_our_own_claim():
+    older = talk_runs.start_run("agent", "outlook", lambda _rid: "sunny")
+    ours = talk_runs.start_run("agent", "triage", lambda _rid: "all clear")
+    _wait_terminal(older)
+    _wait_terminal(ours)
+    assert talk_runs.claim_delivery(older, claimant="ts-previous-call")
+    assert talk_runs.claim_delivery(ours, claimant="ts-test")
+
+    result = talk_tools.execute_talk_tool("check_work", {})
+
+    assert f"run {older}" not in result, "an earlier call was speaking it; not ours to re-list"
+    assert f"run {ours} (agent) finished" in result, "our own in-flight claim is still unshared"
+    assert talk_runs.shared_with_caller(talk_runs.get_run(older))
+    assert not talk_runs.shared_with_caller(talk_runs.get_run(ours))
+
+
+def test_check_work_never_lists_a_run_replaced_by_a_widened_one():
+    gate = threading.Event()
+    original = talk_runs.start_run("agent", "audit", lambda _rid: gate.wait(3) or "x")
+    talk_runs.annotate_run(original, replaced_by=original + 1)
+    try:
+        result = talk_tools.execute_talk_tool("check_work", {})
+    finally:
+        gate.set()
+    assert f"run {original}" not in result
+
+
+def test_check_work_description_says_talk_tracks_what_was_shared():
+    schema = next(tool for tool in talk_tools.default_talk_tools() if tool["name"] == "check_work")
+    text = schema["description"]
+    assert "You track what has been shared" in text
+    assert "never ask the caller which one to open" in text
+    assert "volunteer unshared results at a pause" in text
+    assert "'working'" in text and "'ready, not yet shared'" in text
+
+
+# -- #72: steer by replace ----------------------------------------------------------
+
+
+class _FakeProcess:
+    """A detached child's Popen: alive until terminated, then exits 0.
+
+    ``gate`` is the worker's own wait; a real ``communicate()`` returns when
+    the child dies, so terminating releases it the same way.
+    """
+
+    def __init__(self, gate: threading.Event | None = None) -> None:
+        self.returncode = None
+        self.terminated = False
+        self.gate = gate
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+        if self.gate is not None:
+            self.gate.set()
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def _stub_api_server_lane(monkeypatch, started: list):
+    """Make run_agent land on the api-server tier with a recorded prompt."""
+
+    monkeypatch.setattr(talk_host.talk_apiserver, "is_available", lambda: True)
+
+    def _worker(prompt, *, session_id):
+        started.append(prompt)
+        gate = threading.Event()
+        return lambda _rid: gate.wait(3) or "widened result"
+
+    monkeypatch.setattr(talk_host, "_api_server_worker", _worker)
+
+
+def test_steer_by_replace_cancels_the_original_and_starts_one_widened_job(monkeypatch):
+    started: list[str] = []
+    _stub_api_server_lane(monkeypatch, started)
+    gate = threading.Event()
+    original = talk_runs.start_run(
+        "agent",
+        "audit the auth module",
+        lambda _rid: gate.wait(3) or "x",
+        meta={"task": "Audit the auth module for injection bugs."},
+    )
+    process = _FakeProcess()
+    talk_runs.register_process(original, process)
+
+    out = talk_tools.execute_talk_tool(
+        "steer_agent", {"agent_id": str(original), "text": "also cover the session cookies"}
+    )
+    gate.set()
+
+    assert process.terminated, "the original was cancelled"
+    assert "widened" in out and "one job" in out
+    assert "do not start another job" in out.lower()
+    assert "stopping it and restarting" not in out, "no refusal that invites a duplicate"
+    assert len(started) == 1
+    assert "Audit the auth module for injection bugs." in started[0]
+    assert "also cover the session cookies" in started[0]
+    new_id = talk_runs.run_id_from_receipt(out)
+    assert new_id is not None and new_id != original
+    replacement = talk_runs.get_run(new_id)
+    assert replacement["label"] == "audit the auth module", "the replacement keeps the name"
+    assert replacement["meta"]["replaces"] == original
+    assert talk_runs.get_run(original)["meta"]["replaced_by"] == new_id
+    assert talk_runs.replaced(talk_runs.get_run(original))
+    assert not talk_runs.replaced(replacement)
+    # Only the replacement is visible; the cancelled original is machinery.
+    listing = talk_tools.execute_talk_tool("check_work", {})
+    assert f"run {new_id}" in listing and f"run {original}" not in listing
+
+
+def test_steer_by_replace_carries_the_admission_declaration(monkeypatch):
+    started: list[str] = []
+    _stub_api_server_lane(monkeypatch, started)
+    gate = threading.Event()
+    original = talk_runs.start_run(
+        "agent",
+        "deploy",
+        lambda _rid: gate.wait(3) or "x",
+        meta={"task": "Deploy the site."},
+        execution_mode="exclusive",
+        resource_keys=["repo:site"],
+    )
+    talk_runs.register_process(original, _FakeProcess(gate))
+
+    out = talk_tools.execute_talk_tool(
+        "steer_agent", {"agent_id": str(original), "text": "and warm the cache"}
+    )
+    gate.set()
+
+    new_id = talk_runs.run_id_from_receipt(out)
+    assert new_id is not None, out
+    assert talk_runs.get_run(new_id)["admission"]["keys"] == ["repo:site"]
+
+
+def test_steer_by_replace_falls_back_honestly_when_no_lane_can_start_the_replacement(
+    monkeypatch,
+):
+    gate = threading.Event()
+    original = talk_runs.start_run("agent", "audit", lambda _rid: gate.wait(3) or "x")
+    talk_runs.register_process(original, _FakeProcess())
+
+    out = talk_tools.execute_talk_tool(
+        "steer_agent", {"agent_id": str(original), "text": "wider"}
+    )
+    gate.set()
+
+    assert "couldn't start the wider version" in out
+    assert "do not start another job" in out.lower()
+    assert not talk_runs.replaced(talk_runs.get_run(original)), "no replacement: outcome is news"
+
+
+def test_a_steerable_api_run_is_steered_not_replaced(monkeypatch):
+    posts: list = []
+    monkeypatch.setattr(talk_host.talk_apiserver, "steering_supported", lambda: True)
+    monkeypatch.setattr(
+        talk_host.talk_apiserver, "steer_run", lambda rid, text: posts.append((rid, text))
+    )
+    gate = threading.Event()
+    run_id = talk_runs.start_run("agent", "triage", lambda _rid: gate.wait(3) or "x")
+    talk_runs.annotate_run(
+        run_id, lane=talk_host.LANE_API_SERVER, api_run_id="r-9", api_session_id="s-9"
+    )
+    out = talk_tools.execute_talk_tool("steer_agent", {"agent_id": str(run_id), "text": "note"})
+    gate.set()
+    assert posts == [("r-9", "note")]
+    assert "widened" not in out
 
 
 def test_check_work_reports_a_previous_session_as_lost(monkeypatch, tmp_path):

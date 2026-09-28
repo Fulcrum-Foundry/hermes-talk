@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -372,6 +373,29 @@ def started_sentinel(run_id: int, kind: str, label: str) -> str:
     """The receipt a tool handler returns so the session starts polling."""
 
     return f"WORK_STARTED #{run_id} kind={kind} ({label})"
+
+
+_STARTED_RE = re.compile(r"WORK_STARTED #(\d+) kind=")
+
+
+def run_id_from_receipt(receipt: str | None) -> int | None:
+    """The run id a WORK_STARTED receipt names, or ``None`` for any other text."""
+
+    match = _STARTED_RE.search(str(receipt or ""))
+    return int(match.group(1)) if match else None
+
+
+def replaced(run: dict | None) -> bool:
+    """Whether this run was (or is being) replaced by a widened one (#72).
+
+    A replaced run's outcome is never announced and it is never listed as
+    ready: the replacement carries the caller's request forward.
+    """
+
+    if not isinstance(run, dict):
+        return False
+    meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
+    return bool(meta.get("replaced_by") or meta.get("replacing"))
 
 
 def _history_path():
@@ -1155,6 +1179,30 @@ def _flip_delivered_in_history(run_id: int, claimant: str) -> bool:
         return False
 
 
+def shared_with_caller(run: dict | None, *, claimant: str | None = None) -> bool:
+    """Whether this result has already reached the caller (#71).
+
+    True for a terminal run whose result is ``delivered``, or is ``claimed``
+    by a session other than ``claimant`` (an earlier call was speaking it; the
+    caller has heard it or its process is gone — either way this call does
+    not own it and must not re-list it). ``claimant`` defaults to the bound
+    owner's Talk session id. A running run is never "shared".
+    """
+
+    if not isinstance(run, dict) or run.get("status") not in TERMINAL_STATUSES:
+        return False
+    delivery = run.get("delivery")
+    if delivery == DELIVERED:
+        return True
+    if delivery != DELIVERY_CLAIMED:
+        return False
+    if claimant is None:
+        owner = current_owner() or {}
+        claimant = owner.get("talkSessionId")
+    claim = run.get("deliveryClaim") or {}
+    return bool(claimant) and claim.get("claimant") != claimant
+
+
 def list_undelivered_for_session(
     hermes_session_id: str | None,
     *,
@@ -1529,10 +1577,13 @@ __all__ = [
     "normalize_resource_keys",
     "register_process",
     "release_process",
+    "replaced",
     "reset_for_tests",
     "resolve_execution_mode",
     "resolve_run_record",
+    "run_id_from_receipt",
     "run_outcome",
+    "shared_with_caller",
     "start_run",
     "started_sentinel",
     "stop_was_requested",
