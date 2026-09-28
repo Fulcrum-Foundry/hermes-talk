@@ -882,9 +882,9 @@ def _describe_run(run: dict) -> str:
         line += _describe_age(run)
         if meta.get("phase") == "awaiting_children":
             waiting = meta.get("children_outstanding", "?")
-            line += f" — the agent's turn ended; waiting on {waiting} delegated task(s)"
+            line += f" — its own turn ended; waiting on {waiting} helper(s)"
         elif meta.get("phase") == "synthesizing":
-            line += " — all delegated tasks reported; writing the final answer"
+            line += " — every helper reported; writing the final answer"
         # What a live run holds (hermes-talk#101), so "why was that refused?"
         # has an answer the model can read out.
         admission = run.get("admission") if isinstance(run.get("admission"), dict) else {}

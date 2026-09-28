@@ -120,7 +120,10 @@ class Scheduler:
     ) -> None:
         self.policy = coerce_policy(policy)
         self._answer_pending = answer_pending or (lambda: False)
-        self._get_run = get_run or talk_runs.get_run
+        # resolve_run_record, not get_run: a result adopted from an earlier
+        # call lives in history, and the live registry alone returns None —
+        # heard as "the work you asked for is back: nothing to share".
+        self._get_run = get_run or talk_runs.resolve_run_record
         #: Completions parked instead of spoken: run_id -> (commands, on_sent).
         self._ready: dict[int, tuple[Any, Any]] = {}
         self._ready_order: list[int] = []

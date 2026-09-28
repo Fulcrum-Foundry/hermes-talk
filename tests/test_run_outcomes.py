@@ -239,7 +239,7 @@ def test_a_completed_turn_with_children_outstanding_is_incomplete_not_success(mo
     out = talk_apiserver.run_to_outcome("go", child_counter=lambda: (2, 0))
     assert out.outcome == talk_apiserver.OUTCOME_INCOMPLETE
     assert out.children_outstanding == 2
-    assert "2 delegated task(s) are still running" in out.speakable()
+    assert "2 helper(s) are still working" in out.speakable()
     assert not out.succeeded
 
 
@@ -292,7 +292,7 @@ def test_worker_waits_for_parked_child_results_and_synthesizes_once(monkeypatch)
             break
         time.sleep(0.01)
     assert run["status"] == "running"
-    assert "waiting on 2 delegated task(s)" in talk_tools.execute_talk_tool(
+    assert "waiting on 2 helper(s)" in talk_tools.execute_talk_tool(
         "check_work", {"run_id": run_id}
     )
 

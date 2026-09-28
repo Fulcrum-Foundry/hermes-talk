@@ -513,11 +513,11 @@ class RunOutcome:
         """The one sentence a worker may return when it is asked for text."""
 
         if self.outcome == OUTCOME_SUCCESS:
-            return self.output or "the agent finished without saying anything"
+            return self.output or "it finished without saying anything"
         if self.outcome == OUTCOME_INCOMPLETE:
-            head = self.output or "the agent's turn ended"
+            head = self.output or "its turn ended"
             why = self.error or (
-                f"{self.children_outstanding} delegated task(s) are still running; "
+                f"{self.children_outstanding} helper(s) are still working; "
                 "the final result is not in yet"
             )
             return f"{head} — {why}"

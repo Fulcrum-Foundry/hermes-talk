@@ -588,3 +588,31 @@ def test_a_ready_record_adopted_at_connect_waits_for_the_caller_to_speak():
     before, after = asyncio.run(run())
     assert before == [], "spoke a ready record before the caller said anything"
     assert any("ready" in h.lower() for h in after), after
+
+
+def test_segue_resolves_a_result_adopted_from_history(monkeypatch):
+    """Live sim: a result from an earlier call parked for a segue resolved to {} through
+    the live registry, so the caller heard 'the work you asked for … nothing to share'."""
+
+    monkeypatch.setattr(talk_runs, "get_run", lambda rid: None)
+    monkeypatch.setattr(
+        talk_runs,
+        "resolve_run_record",
+        lambda rid: {
+            "runId": rid,
+            "status": "done",
+            "label": "your text",
+            "output": "Texted you: hi",
+            "meta": {"outcome": "success", "named": True},
+        },
+    )
+    sched = talk_announce.Scheduler("immediate_segue", answer_pending=lambda: False)
+    sched.park_completion(7, ["cmd"], None)
+    due = sched.segue_commands()
+    assert due is not None
+    _rid, commands = due
+    text = repr(commands)
+    assert "your text" in text
+    assert "Texted you: hi" in text
+    assert "the work you asked for" not in text
+
