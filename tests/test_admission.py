@@ -379,7 +379,7 @@ def test_snapshots_carry_the_admission_and_check_work_reads_it_out():
     assert talk_runs.get_run(run_id)["admission"]["keys"] == ["/repo", "prod"]
 
     spoken = talk_tools.execute_talk_tool("check_work", {})
-    assert f"run {run_id} (agent) running" in spoken
+    assert f"running (run_id {run_id})" in spoken
     assert "holding '/repo', 'prod'" in spoken
     gate.release.set()
 
@@ -400,7 +400,16 @@ def test_delegate_task_threads_the_declaration_into_the_host(monkeypatch):
     seen: dict = {}
 
     class _Host:
-        def run_agent(self, task, background=True, *, execution_mode=None, resource_keys=None):
+        def run_agent(
+            self,
+            task,
+            background=True,
+            *,
+            execution_mode=None,
+            resource_keys=None,
+            brief=None,
+            label=None,
+        ):
             seen.update(
                 task=task, background=background, mode=execution_mode, keys=resource_keys
             )
@@ -416,8 +425,8 @@ def test_delegate_task_threads_the_declaration_into_the_host(monkeypatch):
         },
     )
     assert result.startswith("WORK_STARTED")
+    assert seen.pop("task").endswith("\naudit it\n")  # the plain brief (Talk 0.25, #65)
     assert seen == {
-        "task": "audit it",
         "background": True,
         "mode": "parallel_read_only",
         "keys": ("/repo", "prod"),

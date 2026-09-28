@@ -11,6 +11,46 @@ but 0.4.0's release title named only the steering verb. They are recorded
 below under 0.4.0 — the first version that shipped them — with the gap
 named rather than smoothed.
 
+## [0.25.0] — 2026-09-28
+
+Seamless voice (hermes-sip-live-voice #64). One assistant, invisible machinery.
+
+- Plain delegation brief (#65): the hand-off is the caller's ask in the caller's
+  words under a one-line `[Voice call with <name>, <time>]` header. The 0.24
+  contract brief (GOAL / REQUIRED SOURCES / SOURCES USED) is `brief_style:
+  contract`, off by default. `talk_brief.blocked_reason` reads a plain
+  "couldn't access X" out of a result for the voice to say.
+- Owner self-notify (#67): a message send whose destination is the bound caller
+  is auto-granted (`talk_approvals.is_self_notify`, reason `self_notify`).
+- Plain speech (#70): no Talk-owned headline says "Background run #N", run,
+  job, lane, session, delegation or receipt. Work is named by its label;
+  run ids ride a silent trailer for tool calls only.
+- Immediate results with a segue (#68): `announcements: immediate_segue`
+  speaks a finished result at the next pause with a one-phrase transition,
+  no "now or later?". `deliver_when_done(run_id)` overrides deferred per item.
+- Filler only when waiting (#69): the model never speaks before a tool call;
+  Talk says "One moment." only if a tool has not returned within
+  `filler_after_s` (1.5s; None disables). Exactly one reply per turn; a late
+  tool result becomes an announcement, not a second reply.
+- Hide shared work (#71): `check_work` groups Working / Ready-not-yet-shared
+  and omits results already heard or claimed by an earlier call.
+- Steer by replace (#72): an unsteerable run is cancelled and restarted once
+  with the widened ask; never a duplicate.
+- LanePolicy: `brief_style`, `caller_name`, `caller_handle`, `filler_after_s`;
+  `talk_lane.attach_policy/current_policy`. New module `talk_filler`.
+- `delegate_task` takes `name` (two to four words the model will keep using
+  aloud: "the GBrain check") and `quiet_on_success` (the caller was already
+  told "Sent."; a success is consumed silently, only a failure is spoken).
+  Automatic labels are shortened to "the … work" in every headline.
+
+Live-simulator findings fixed before tagging (Dustin's call shape replayed):
+a result adopted from an earlier call resolved to `{}` and was heard as "the
+work you asked for is back: nothing to share" (the scheduler now reads history);
+a cancelled or already-told run is never adopted as news on a later call, nor
+announced after its stop was acknowledged; `check_work` names the work first,
+hides lost prior-process runs, and says "helper(s)", not "delegated task(s)";
+the memory refusal, "no results yet", and unknown-run lines are plain.
+
 ## [0.24.1] — 2026-09-27
 
 ### Fixed

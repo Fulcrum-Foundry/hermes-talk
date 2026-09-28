@@ -931,7 +931,7 @@ def test_a_reconnect_speaks_the_result_it_was_owed(routed):
         for batch in fake.sent
         for command in batch
     )
-    assert f"Background run #{run_id}" in spoken
+    assert f"run_id {run_id}" in spoken and "Background run" not in spoken
     assert "the index is rebuilt" in spoken
     # Delivered (post-send flip), so the next reconnect does not say it again.
     assert _delivered_in_history(run_id)
@@ -965,9 +965,9 @@ def test_a_reconnect_speaks_every_result_it_was_owed(routed):
         for batch in fake.sent
         for command in batch
     )
-    assert f"Background run #{first}" in spoken
+    assert f"run_id {first}" in spoken
     assert "the index is rebuilt" in spoken
-    assert f"Background run #{second}" in spoken
+    assert f"run_id {second}" in spoken
     assert "the audit is done" in spoken
     # Both durably delivered — an early-return/break after the first would
     # leave the second still owed (and still claimable) here.
@@ -988,7 +988,7 @@ def test_a_reconnect_does_not_speak_a_stranger_s_result(routed):
         for command in batch
     )
     assert "not yours" not in spoken
-    assert "Background run #" not in spoken
+    assert "run_id" not in spoken and "is done" not in spoken
     # Still owed to its real owner rather than silently consumed.
     assert _owed_to("sess-somebody-else")
 
@@ -1007,7 +1007,7 @@ def test_a_reconnect_does_not_adopt_a_different_operator_binding(routed):
         for command in batch
     )
     assert "someone else's answer" not in spoken
-    assert "Background run #" not in spoken
+    assert "run_id" not in spoken and "is done" not in spoken
     # Still owed under its OWN binding rather than consumed by this one.
     assert [
         r["runId"]

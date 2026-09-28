@@ -208,7 +208,7 @@ def test_worker_records_a_real_success_as_finished(monkeypatch):
     run = _wait_terminal(run_id)
     assert run["status"] == "done"
     assert talk_runs.run_outcome(run) == talk_runs.OUTCOME_SUCCESS
-    assert "finished" in _spoken(run)
+    assert "is done" in _spoken(run)
     assert "partial" not in _spoken(run)
 
 
@@ -239,7 +239,7 @@ def test_a_completed_turn_with_children_outstanding_is_incomplete_not_success(mo
     out = talk_apiserver.run_to_outcome("go", child_counter=lambda: (2, 0))
     assert out.outcome == talk_apiserver.OUTCOME_INCOMPLETE
     assert out.children_outstanding == 2
-    assert "2 delegated task(s) are still running" in out.speakable()
+    assert "2 helper(s) are still working" in out.speakable()
     assert not out.succeeded
 
 
@@ -292,7 +292,7 @@ def test_worker_waits_for_parked_child_results_and_synthesizes_once(monkeypatch)
             break
         time.sleep(0.01)
     assert run["status"] == "running"
-    assert "waiting on 2 delegated task(s)" in talk_tools.execute_talk_tool(
+    assert "waiting on 2 helper(s)" in talk_tools.execute_talk_tool(
         "check_work", {"run_id": run_id}
     )
 
@@ -314,7 +314,7 @@ def test_worker_waits_for_parked_child_results_and_synthesizes_once(monkeypatch)
     # Exactly one follow-up run, on the same session, and it was the synthesis prompt.
     assert len(submissions) == 2
     assert submissions[1] == talk_host.CONTINUATION_PROMPT
-    assert "finished" in _spoken(run)
+    assert "is done" in _spoken(run)
 
 
 def test_children_that_never_report_leave_an_honest_incomplete(monkeypatch):
@@ -402,4 +402,34 @@ def test_delivery_evidence_is_a_receipt_not_a_gate():
     acked = {"audible_ms": 480, "acknowledged": True, "ms": 480}
     assert talk_delivery.is_delivered(acked)
     assert talk_delivery.stage(acked) == talk_delivery.DELIVERED
+
+
+def test_a_cancelled_run_from_an_earlier_call_is_not_adopted_as_news(monkeypatch, tmp_path):
+    """Live sim: 'the work you asked for is back: nothing to share' on the next call, for a
+    job the operator had cancelled on the previous one."""
+
+    history = tmp_path / "talk-runs.jsonl"
+    monkeypatch.setattr(talk_runs, "_history_path", lambda: history)
+    monkeypatch.setattr(talk_runs, "_history_enabled", lambda: True)
+    talk_runs.attach_owner(
+        talk_session_id="ts-earlier",
+        generation_id="g1",
+        hermes_session_id="hs-1",
+        operator="op",
+        profile="p",
+    )
+    gate = threading.Event()
+
+    def worker(_rid: int) -> str:
+        gate.wait(5)
+        return "unused"
+
+    run_id = talk_runs.start_run("agent", "gbrain lookup", worker)
+    talk_runs.finish_run(run_id, "failed", "stopped", outcome=talk_runs.OUTCOME_CANCELLED)
+    gate.set()
+    adopted = talk_runs.list_undelivered_for_session(
+        "hs-1", operator="op", profile="p", claimant="ts-later"
+    )
+    assert [r["runId"] for r in adopted] == []
+    assert talk_runs.get_run(run_id)["delivery"] == talk_runs.DELIVERED
 

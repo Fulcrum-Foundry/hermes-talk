@@ -223,11 +223,14 @@ def test_stop_work_supersedes_open_receipts_and_detached_runs_keep_the_old_refus
     assert "stop" in out.lower()
     assert talk_api_steer.receipt(rec["action_id"])["state"] == talk_api_steer.SUPERSEDED
     gate.set()
-    # A detached one-shot has no channel: the honest offer stands.
+    # A detached one-shot has no channel: steer by replace (#72) — here the
+    # test run holds no process handle, so the stop refuses and the reply
+    # keeps it one job rather than inviting a duplicate.
+    monkeypatch.setattr(talk_host, "hermes_binary", lambda: None)
     gate2 = threading.Event()
     detached = talk_runs.start_run("agent", "d", _blocking(gate2, "ok"))
     out = talk_tools.execute_talk_tool("steer_agent", {"agent_id": str(detached), "text": "x"})
-    assert "detached one-shot" in out
+    assert "couldn't widen" in out and "Do not start another job" in out
     gate2.set()
 
 

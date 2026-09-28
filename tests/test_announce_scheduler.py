@@ -65,7 +65,13 @@ class _Wire:
 
 def _runs(*entries):
     table = {
-        rid: {"runId": rid, "label": label, "status": status} for rid, label, status in entries
+        rid: {
+            "runId": rid,
+            "label": label,
+            "status": status,
+            "output": "the report body" if status == "done" else "",
+        }
+        for rid, label, status in entries
     }
     return lambda rid: table.get(rid)
 
@@ -202,7 +208,7 @@ def test_closing_call_never_plays_a_last_routine_update_but_approvals_pass():
         return wire.headlines()
 
     spoken = asyncio.run(run())
-    assert len(spoken) == 1 and "waiting for approval" in spoken[0]
+    assert len(spoken) == 1 and "needs an okay" in spoken[0]
 
 
 # -- coalescing and repeats -----------------------------------------------------
@@ -224,7 +230,8 @@ def test_three_ready_jobs_produce_one_notice():
 
     spoken, flips = asyncio.run(run())
     assert len(spoken) == 1
-    assert "3 background jobs are ready" in spoken[0]
+    assert "3 things you asked for are ready" in spoken[0]
+    assert "run 1" not in spoken[0] and "job" not in spoken[0]
     for label in ("triage", "outlook", "deploy"):
         assert label in spoken[0]
     assert "ONE short sentence" in spoken[0]
@@ -308,7 +315,7 @@ def test_a_live_heartbeat_still_plays_under_the_deferred_policy():
         return wire.headlines()
 
     spoken = asyncio.run(run())
-    assert len(spoken) == 1 and "still working" in spoken[0]
+    assert len(spoken) == 1 and "still going" in spoken[0]
 
 
 # -- approvals are actionable events ----------------------------------------------
@@ -380,6 +387,162 @@ def test_a_session_without_a_scheduler_behaves_as_0_22():
     assert len(spoken) == 2
 
 
+# -- immediate with segue (#68) ------------------------------------------------------
+
+
+def _segue_headline(wire):
+    heads = wire.headlines()
+    assert len(heads) == 1, heads
+    return heads[0]
+
+
+def test_immediate_segue_speaks_the_result_at_a_pause_with_no_question():
+    async def run():
+        queue, wire, _s, pump = _scenario("immediate_segue", _runs((1, "triage", "done")))
+        flips: list[int] = []
+        await queue.put(_completion(1, "triage", flips))
+        await _settle()
+        pump.cancel()
+        return wire, flips
+
+    wire, flips = asyncio.run(run())
+    head = _segue_headline(wire)
+    assert "now or later" not in head.lower() or "do not ask" in head.lower()
+    assert "Offer this" not in head, "no offer — the result itself is spoken"
+    assert "the report body" in head, "the spoken form rides the segue"
+    assert talk_announce.segue_for("the triage work", 1) in head
+    assert "run 1" not in head and "#1" not in head, "labels only, never run numbers"
+    assert flips == [1], "speaking the result IS the delivery"
+
+
+def test_segue_prefix_comes_from_the_small_list_and_capitalises_a_leading_label():
+    for rid in range(6):
+        opener = talk_announce.segue_for("triage", rid)
+        assert opener in {"Quick update on triage:", "On triage:", "Triage is back:"}
+    assert set(talk_announce.segue_for("triage", r) for r in range(3)) == {
+        "Quick update on triage:",
+        "On triage:",
+        "Triage is back:",
+    }
+
+
+def test_segue_spoken_form_is_the_first_sixty_words():
+    long = " ".join(f"w{i}" for i in range(200))
+    spoken = talk_announce.spoken_form(long)
+    assert spoken.endswith("…") and spoken.rstrip("…").split() == long.split()[:60]
+    assert "w60" not in spoken
+
+
+def test_immediate_segue_is_blocked_while_the_caller_speaks_and_on_hold():
+    async def run():
+        queue, wire, _s, pump = _scenario("immediate_segue", _runs((1, "triage", "done")))
+        talk_controls.note_caller_speaking(True)
+        await queue.put(_completion(1, "triage", []))
+        await _settle()
+        while_speaking = list(wire.headlines())
+        talk_controls.note_caller_speaking(False)
+        talk_tools.execute_talk_tool("hold", {})
+        await _settle()
+        on_hold = list(wire.headlines())
+        talk_tools.execute_talk_tool("resume", {})
+        await _settle()
+        pump.cancel()
+        return while_speaking, on_hold, wire.headlines()
+
+    while_speaking, on_hold, after = asyncio.run(run())
+    assert while_speaking == [] and on_hold == []
+    assert len(after) == 1 and "the report body" in after[0]
+
+
+def test_immediate_segue_still_parks_after_later():
+    async def run():
+        queue, wire, _s, pump = _scenario("immediate_segue", _runs((1, "triage", "done")))
+        talk_tools.execute_talk_tool("defer_updates", {})
+        await queue.put(_completion(1, "triage", []))
+        await _settle()
+        parked = list(wire.headlines())
+        released = talk_announce.acknowledge()
+        await _settle()
+        pump.cancel()
+        return parked, released, wire.headlines()
+
+    parked, released, after = asyncio.run(run())
+    assert parked == [] and released == [1] and after == []
+
+
+def test_immediate_segue_speaks_two_results_one_per_pause_never_a_coalesced_offer():
+    async def run():
+        get_run = _runs((1, "triage", "done"), (2, "outlook", "done"))
+        queue, wire, _s, pump = _scenario("immediate_segue", get_run)
+        talk_controls.note_caller_speaking(True)
+        await queue.put(_completion(1, "triage", []))
+        await queue.put(_completion(2, "outlook", []))
+        await _settle()
+        talk_controls.note_caller_speaking(False)
+        await _settle(0.2)
+        pump.cancel()
+        return wire.headlines()
+
+    heads = asyncio.run(run())
+    assert len(heads) == 2
+    assert "triage" in heads[0] and "outlook" in heads[1]
+    assert not any("background jobs are ready" in h for h in heads)
+
+
+def test_deliver_when_done_overrides_the_deferred_policy_for_one_run():
+    async def run():
+        get_run = _runs((1, "triage", "done"), (2, "outlook", "done"))
+        queue, wire, scheduler, pump = _scenario("deferred", get_run)
+        talk_controls.note_caller_speaking(True)
+        assert scheduler.deliver_when_done(1) is False, "not parked yet"
+        await queue.put(_completion(1, "triage", []))
+        await queue.put(_completion(2, "outlook", []))
+        await _settle()
+        talk_controls.note_caller_speaking(False)
+        await _settle(0.2)
+        pump.cancel()
+        return wire.headlines(), scheduler.ready_ids()
+
+    heads, ready = asyncio.run(run())
+    assert len(heads) == 2
+    spoken = [h for h in heads if "the report body" in h]
+    offered = [h for h in heads if "Offer this" in h]
+    assert len(spoken) == 1 and "triage" in spoken[0], "the marked run is spoken in full"
+    assert len(offered) == 1 and "outlook" in offered[0] and "triage" not in offered[0]
+    assert "run 2" not in offered[0], "the offer names work by label only"
+    assert ready == [2], "the spoken one left the ledger; the offered one stays retrievable"
+
+
+def test_deliver_when_done_tool_marks_a_run_and_speaks_by_label(monkeypatch):
+    run = {"runId": 4, "kind": "agent", "label": "triage", "status": "running", "output": "",
+           "meta": {}, "ts": 0}
+    monkeypatch.setattr(talk_runs, "get_run", lambda rid: run if rid == 4 else None)
+    scheduler = talk_announce.Scheduler("deferred")
+    talk_announce.attach_session(scheduler)
+    out = talk_tools.execute_talk_tool("deliver_when_done", {"run_id": 4})
+    assert "triage" in out and "as soon as it lands" in out
+    assert "run 4" not in out
+    scheduler.park_completion(4, ["cmd"], None)
+    run["status"] = "done"
+    assert scheduler.pending_segue()
+    out = talk_tools.execute_talk_tool("deliver_when_done", {"run_id": 4})
+    assert "already finished" in out and "next pause" in out
+    assert "needs the run number" in talk_tools.execute_talk_tool("deliver_when_done", {})
+
+
+def test_no_spoken_string_from_the_scheduler_names_a_run_number():
+    get_run = _runs((12, "triage", "done"), (11, "outlook", "done"), (10, "deploy", "done"))
+    scheduler = talk_announce.Scheduler("deferred", get_run=get_run)
+    for rid in (12, 11, 10):
+        scheduler.park_completion(rid, ["cmd"], None)
+    text = " ".join(
+        c.text for c in scheduler.notice_commands() if isinstance(c, talk_realtime.AddContext)
+    )
+    for rid in (12, 11, 10):
+        assert f"run {rid}" not in text and f"#{rid}" not in text
+    assert "triage" in text and "never say the numbers aloud" in text
+
+
 def test_blockers_name_every_state_for_diagnostics():
     scheduler = talk_announce.Scheduler("deferred", answer_pending=lambda: True)
     talk_controls.note_caller_speaking(True)
@@ -399,6 +562,10 @@ def test_blockers_name_every_state_for_diagnostics():
     }
     immediate = talk_announce.Scheduler("immediate", answer_pending=lambda: False)
     assert immediate.blockers() == []
+    segue = talk_announce.Scheduler("immediate_segue", answer_pending=lambda: False)
+    assert segue.gated and not segue.deferred
+    assert talk_announce.BLOCK_HOLD in segue.blockers()
+    assert talk_announce.coerce_policy("Immediate_Segue") == "immediate_segue"
 
 
 def test_a_ready_record_adopted_at_connect_waits_for_the_caller_to_speak():
@@ -421,3 +588,31 @@ def test_a_ready_record_adopted_at_connect_waits_for_the_caller_to_speak():
     before, after = asyncio.run(run())
     assert before == [], "spoke a ready record before the caller said anything"
     assert any("ready" in h.lower() for h in after), after
+
+
+def test_segue_resolves_a_result_adopted_from_history(monkeypatch):
+    """Live sim: a result from an earlier call parked for a segue resolved to {} through
+    the live registry, so the caller heard 'the work you asked for … nothing to share'."""
+
+    monkeypatch.setattr(talk_runs, "get_run", lambda rid: None)
+    monkeypatch.setattr(
+        talk_runs,
+        "resolve_run_record",
+        lambda rid: {
+            "runId": rid,
+            "status": "done",
+            "label": "your text",
+            "output": "Texted you: hi",
+            "meta": {"outcome": "success", "named": True},
+        },
+    )
+    sched = talk_announce.Scheduler("immediate_segue", answer_pending=lambda: False)
+    sched.park_completion(7, ["cmd"], None)
+    due = sched.segue_commands()
+    assert due is not None
+    _rid, commands = due
+    text = repr(commands)
+    assert "your text" in text
+    assert "Texted you: hi" in text
+    assert "the work you asked for" not in text
+

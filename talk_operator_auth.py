@@ -65,6 +65,7 @@ READ_ONLY_TALK_TOOLS = frozenset(
         "resume",
         "set_verbosity",
         "defer_updates",
+        "deliver_when_done",
         "get_result",
     }
 )

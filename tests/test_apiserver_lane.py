@@ -640,7 +640,7 @@ def test_search_memory_tier_c_names_what_is_missing(monkeypatch, lane_on):
 
     out = talk_tools.execute_talk_tool("search_memory", {"query": "retry policy"})
 
-    assert "memory isn't available" in out
+    assert "can't get to memory" in out
     assert "isn't reachable" in out
     assert "WORK_STARTED" not in out
 

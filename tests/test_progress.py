@@ -20,6 +20,7 @@ import fixture_data
 import pytest
 
 import talk_apiserver
+import talk_brief
 import talk_cli
 import talk_host
 import talk_lifecycle
@@ -222,7 +223,8 @@ def test_the_spoken_milestone_is_contained_and_carries_no_routing_metadata():
         "item_id": create["item"]["id"],
     }
     text = create["item"]["content"][0]["text"]
-    assert "Background run #7" in text
+    assert "The audit work is in progress" in text
+    assert "Background run" not in text and "run 7" not in text
     assert "Reading files" in text
     for leaked in ("ts-secret", "gen-secret", "sess-secret", "req-secret", "codex-oauth"):
         assert leaked not in text
@@ -234,10 +236,12 @@ def test_heartbeat_and_blocked_and_accepted_speech():
         kind: _spoken_text(talk_cli.run_phase_commands(run, kind))
         for kind in ("heartbeat", "accepted", "blocked")
     }
-    assert "still working" in texts["heartbeat"]
-    assert "was accepted" in texts["accepted"]
+    assert "still going" in texts["heartbeat"]
+    assert "is underway" in texts["accepted"]
     assert "waiting on an approval" in texts["blocked"]
-    assert "#9" in texts["heartbeat"]
+    # The run id rides for the model's tool calls, flagged never-to-speak (#70).
+    assert "run_id 9" in texts["heartbeat"] and "never say the number aloud" in texts["heartbeat"]
+    assert "Background run" not in texts["heartbeat"]
 
 
 def test_terminal_phases_build_no_milestone_speech():
@@ -817,19 +821,17 @@ def test_subagent_phase_speech_names_the_agent_its_role_and_its_phase():
     """
 
     base = {"subagent_id": "sa-0-aaaa", "role": "researcher"}
-    assert (
-        "Background agent sa-0-aaaa (researcher) was accepted."
-        in _child_spoken(**base, phase="accepted")
+    accepted = _child_spoken(**base, phase="accepted")
+    assert "The researcher work is underway." in accepted
+    assert "id sa-0-aaaa" in accepted and "never say it aloud" in accepted
+    assert "Background agent" not in accepted
+    assert "The researcher work is in progress \u2014 Reading files." in _child_spoken(
+        **base, phase="executing", detail="Reading files"
     )
-    assert (
-        "Background agent sa-0-aaaa (researcher) is executing \u2014 Reading files."
-        in _child_spoken(**base, phase="executing", detail="Reading files")
-    )
-    assert "is executing." in _child_spoken(**base, phase="executing")
+    assert "is in progress." in _child_spoken(**base, phase="executing")
     assert "waiting on an approval" in _child_spoken(**base, phase="blocked")
-    assert (
-        "Background agent sa-0-aaaa was accepted."
-        in _child_spoken(subagent_id="sa-0-aaaa", phase="accepted")
+    assert "Part of the work you asked for is underway." in _child_spoken(
+        subagent_id="sa-0-aaaa", phase="accepted"
     )
     # No id is no subject: nothing is spoken rather than a nameless sentence.
     assert talk_cli.subagent_phase_commands({"phase": "accepted"}) == []
@@ -879,7 +881,8 @@ def test_spoken_labels_are_truncated_to_the_progress_label_cap():
     run = _run_snapshot(7, "executing", long_detail)
     run["label"] = long_label
     text = _spoken_text(talk_cli.run_phase_commands(run, "executing"))
-    assert "L" * cap in text and "L" * (cap + 1) not in text
+    label_cap = talk_brief.LABEL_CHARS
+    assert "L" * label_cap in text and "L" * (label_cap + 1) not in text
     assert "D" * cap in text and "D" * (cap + 1) not in text
 
     # The heartbeat carries the label too, on the same cap.

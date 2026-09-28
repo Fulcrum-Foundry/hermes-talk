@@ -371,6 +371,6 @@ def test_the_preamble_carries_the_never_invent_and_steering_rules():
 def test_the_preamble_teaches_the_spoken_approval_flow():
     text = talk_identity.VOICE_PREAMBLE
     assert "resolve_approval" in text
-    assert "once, this session, or no" in text
+    assert "once, for the rest of that work, or no" in text
     assert "Always is never grantable by voice" in text
     assert "interrupts the question or does not answer" in text

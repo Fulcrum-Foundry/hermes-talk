@@ -210,7 +210,8 @@ def test_registry_is_capped_at_max_runs(monkeypatch):
 def test_sentinel_carries_id_and_kind():
     sentinel = talk_runs.started_sentinel(12, "agent", "audit the site")
 
-    assert sentinel == "WORK_STARTED #12 kind=agent (audit the site)"
+    assert sentinel.startswith("WORK_STARTED #12 kind=agent (audit the site)")
+    assert "no numbers" in sentinel  # the spoken hint rides the receipt (sip #64)
 
 
 # --- history tee -------------------------------------------------------------

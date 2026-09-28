@@ -29,6 +29,9 @@ from typing import Any
 #: visible marker so a diagnostics read can tell the pack was cut.
 INSTRUCTIONS_CAP = 6_000
 TRUNCATION_MARKER = "\n[operating pack truncated at cap]"
+#: Seconds a tool call may run in silence before Talk speaks one short filler
+#: (#69). Lives here, not in talk_cli, so the policy default can name it.
+FILLER_AFTER_S = 1.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +58,14 @@ class LanePolicy:
         coalesced notice at a natural pause; routine speech is suppressed
         while the caller speaks, during hold, after "later", and once the
         call is closing. Approval questions are never deferred past the pause.
+        ``"immediate_segue"`` (#68) gates the same way but SPEAKS each result
+        at the next pause with a short transition and no "now or later?"
+        question; "later" still parks.
+    ``filler_after_s``: how long a tool call may run in silence before Talk
+        itself speaks one short filler ("Give me a second.") (#69). Default
+        :data:`FILLER_AFTER_S`; ``None`` disables the filler for this lane.
+        The model never speaks before a tool call; only Talk fills a wait
+        that is actually long.
     ``verbosity``: the lane's default spoken depth (``"concise"`` /
         ``"detailed"``), or ``None`` for the preamble's own default. The
         caller can flip it per session with ``set_verbosity`` (#57).
@@ -76,6 +87,15 @@ class LanePolicy:
         send time is recorded on the run as ``meta.delivery`` (a receipt for
         ``check_work`` and the ledger). It never gates the exactly-once
         delivered flip, which happens on send on every lane.
+    ``brief_style``: how ``delegate_task`` writes the hand-off (Talk 0.25,
+        #65): ``"plain"`` (the caller's own ask under a one-line header) or
+        ``"contract"`` (the structured envelope). ``None`` = the module
+        default in :mod:`talk_brief` (plain).
+    ``caller_name``: what to call the caller in the plain brief header and
+        in spoken work labels; ``None`` renders as "the caller".
+    ``caller_handle``: the caller's own address on this lane (a phone number,
+        a chat handle). A delegated message send whose destination is this
+        handle is the caller texting themselves and needs no approval (#67).
     """
 
     name: str = "cli"
@@ -87,11 +107,15 @@ class LanePolicy:
     handlers: dict[str, Callable[[dict], Any]] = field(default_factory=dict)
     on_end_call: Callable[[], Any] | None = None
     announcements: str = "immediate"
+    filler_after_s: float | None = FILLER_AFTER_S
     verbosity: str | None = None
     manifest: dict[str, Any] = field(default_factory=dict)
     binding_key: str | None = None
     after_call: str = "retrievable"
     delivery_evidence: Callable[[int], Any] | None = None
+    brief_style: str | None = None
+    caller_name: str | None = None
+    caller_handle: str | None = None
 
     def rendered_instructions(self) -> str | None:
         """The pack as it will be placed in the prompt: stripped, capped, marked when cut."""
@@ -122,10 +146,14 @@ class LanePolicy:
             "spoken_heartbeats": self.spoken_heartbeats,
             "memory_review": self.memory_review,
             "announcements": self.announcements,
+            "filler_after_s": self.filler_after_s,
             "verbosity": self.verbosity,
             "binding": bool(self.binding_key),
             "after_call": self.after_call,
             "delivery_evidence": self.delivery_evidence is not None,
+            "brief_style": self.brief_style,
+            "caller_named": bool(self.caller_name),
+            "caller_handle": bool(self.caller_handle),
             "tools": [t.get("name") for t in self.tools if isinstance(t, dict)],
             "manifest": dict(self.manifest),
         }
@@ -139,4 +167,37 @@ def coerce(policy: LanePolicy | None, lane: str | None) -> LanePolicy:
     return LanePolicy(name=str(lane or "cli"))
 
 
-__all__ = ["INSTRUCTIONS_CAP", "TRUNCATION_MARKER", "LanePolicy", "coerce"]
+#: The live session's policy, so tool handlers and the approval bridge (which
+#: run off the session's own call stack) can read lane facts — brief style,
+#: caller name, caller handle — without reaching back into the transport.
+#: Same one-at-a-time contract as talk_controls: last attach wins, nothing
+#: attached reads as the neutral default.
+_CURRENT: LanePolicy | None = None
+
+
+def attach_policy(policy: LanePolicy | None) -> None:
+    global _CURRENT
+    _CURRENT = policy
+
+
+def detach_policy() -> None:
+    global _CURRENT
+    _CURRENT = None
+
+
+def current_policy() -> LanePolicy:
+    """The attached session's policy, or a neutral default when none is bound."""
+
+    return _CURRENT if _CURRENT is not None else LanePolicy()
+
+
+__all__ = [
+    "FILLER_AFTER_S",
+    "INSTRUCTIONS_CAP",
+    "TRUNCATION_MARKER",
+    "LanePolicy",
+    "attach_policy",
+    "coerce",
+    "current_policy",
+    "detach_policy",
+]
