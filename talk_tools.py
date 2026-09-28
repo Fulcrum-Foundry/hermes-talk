@@ -915,6 +915,17 @@ def _describe_run(run: dict) -> str:
     return line
 
 
+def _already_told(run: dict) -> bool:
+    """A quiet success ("Sent.") the caller already heard about: not "ready, not yet shared"."""
+
+    meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
+    return bool(
+        meta.get("quiet_on_success")
+        and run.get("status") in talk_runs.TERMINAL_STATUSES
+        and talk_runs.run_outcome(run) == talk_runs.OUTCOME_SUCCESS
+    )
+
+
 def _handle_check_work(arguments: dict) -> str:
     run_id = arguments.get("run_id")
     if run_id is not None:
@@ -950,6 +961,7 @@ def _handle_check_work(arguments: dict) -> str:
         if not talk_runs.shared_with_caller(run)
         and not talk_runs.replaced(run)
         and run.get("status") != "lost"
+        and not _already_told(run)
     ]
     working = [run for run in runs if run.get("status") not in talk_runs.TERMINAL_STATUSES]
     ready = [run for run in runs if run.get("status") in talk_runs.TERMINAL_STATUSES]

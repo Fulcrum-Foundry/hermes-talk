@@ -926,3 +926,21 @@ def test_delegate_task_quiet_on_success_is_noted_on_the_run(monkeypatch):
     )
     assert noted == {"rid": 41, "quiet_on_success": True}
 
+
+def test_check_work_hides_a_quiet_success_the_caller_already_heard(monkeypatch):
+    monkeypatch.setattr(
+        talk_runs,
+        "list_runs",
+        lambda limit=10, include_history=False: [
+            {
+                "runId": 5,
+                "status": "done",
+                "delivery": "pending",
+                "label": "your text",
+                "meta": {"outcome": "success", "quiet_on_success": True, "named": True},
+            }
+        ],
+    )
+    out = talk_tools.execute_talk_tool("check_work", {})
+    assert "your text" not in out
+

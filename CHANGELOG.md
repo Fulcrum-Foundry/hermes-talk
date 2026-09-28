@@ -38,6 +38,18 @@ Seamless voice (hermes-sip-live-voice #64). One assistant, invisible machinery.
   with the widened ask; never a duplicate.
 - LanePolicy: `brief_style`, `caller_name`, `caller_handle`, `filler_after_s`;
   `talk_lane.attach_policy/current_policy`. New module `talk_filler`.
+- `delegate_task` takes `name` (two to four words the model will keep using
+  aloud: "the GBrain check") and `quiet_on_success` (the caller was already
+  told "Sent."; a success is consumed silently, only a failure is spoken).
+  Automatic labels are shortened to "the … work" in every headline.
+
+Live-simulator findings fixed before tagging (Dustin's call shape replayed):
+a result adopted from an earlier call resolved to `{}` and was heard as "the
+work you asked for is back: nothing to share" (the scheduler now reads history);
+a cancelled or already-told run is never adopted as news on a later call, nor
+announced after its stop was acknowledged; `check_work` names the work first,
+hides lost prior-process runs, and says "helper(s)", not "delegated task(s)";
+the memory refusal, "no results yet", and unknown-run lines are plain.
 
 ## [0.24.1] — 2026-09-27
 
