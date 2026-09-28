@@ -2324,6 +2324,15 @@ async def run_talk_session(
                 if run is None:
                     return
                 if run["status"] in talk_runs.TERMINAL_STATUSES:
+                    if talk_runs.run_outcome(run) == talk_runs.OUTCOME_CANCELLED and (
+                        talk_runs.stop_was_requested(run_id)
+                    ):
+                        # The operator asked for this stop moments ago and the
+                        # stop tool already acknowledged it; "X was cancelled"
+                        # as a follow-up notice is plumbing (sip #64). Consumed.
+                        if talk_runs.claim_delivery(run_id, claimant=talk_session_id):
+                            _delivered(run_id)
+                        return
                     if talk_runs.replaced(run):
                         # Steered by replace (#72): the widened successor
                         # carries the request; this outcome is consumed

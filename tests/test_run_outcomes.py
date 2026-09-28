@@ -403,3 +403,33 @@ def test_delivery_evidence_is_a_receipt_not_a_gate():
     assert talk_delivery.is_delivered(acked)
     assert talk_delivery.stage(acked) == talk_delivery.DELIVERED
 
+
+def test_a_cancelled_run_from_an_earlier_call_is_not_adopted_as_news(monkeypatch, tmp_path):
+    """Live sim: 'the work you asked for is back: nothing to share' on the next call, for a
+    job the operator had cancelled on the previous one."""
+
+    history = tmp_path / "talk-runs.jsonl"
+    monkeypatch.setattr(talk_runs, "_history_path", lambda: history)
+    monkeypatch.setattr(talk_runs, "_history_enabled", lambda: True)
+    talk_runs.attach_owner(
+        talk_session_id="ts-earlier",
+        generation_id="g1",
+        hermes_session_id="hs-1",
+        operator="op",
+        profile="p",
+    )
+    gate = threading.Event()
+
+    def worker(_rid: int) -> str:
+        gate.wait(5)
+        return "unused"
+
+    run_id = talk_runs.start_run("agent", "gbrain lookup", worker)
+    talk_runs.finish_run(run_id, "failed", "stopped", outcome=talk_runs.OUTCOME_CANCELLED)
+    gate.set()
+    adopted = talk_runs.list_undelivered_for_session(
+        "hs-1", operator="op", profile="p", claimant="ts-later"
+    )
+    assert [r["runId"] for r in adopted] == []
+    assert talk_runs.get_run(run_id)["delivery"] == talk_runs.DELIVERED
+

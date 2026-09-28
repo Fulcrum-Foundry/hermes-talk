@@ -1207,6 +1207,17 @@ def shared_with_caller(run: dict | None, *, claimant: str | None = None) -> bool
     return bool(claimant) and claim.get("claimant") != claimant
 
 
+def _consume_silently(run: dict) -> None:
+    """Flip a result delivered without speech (cancelled on an earlier call)."""
+
+    try:
+        rid = int(run.get("runId"))
+    except (TypeError, ValueError):
+        return
+    if claim_delivery(rid, claimant="silent"):
+        mark_delivered(rid, claimant="silent")
+
+
 def list_undelivered_for_session(
     hermes_session_id: str | None,
     *,
@@ -1259,6 +1270,12 @@ def list_undelivered_for_session(
     out: list[dict] = []
     for run in merged.values():
         if run.get("status") not in TERMINAL_STATUSES:
+            continue
+        if run_outcome(run) == OUTCOME_CANCELLED:
+            # The operator asked for this stop on an earlier call; it is
+            # not news on the next one ("the work you asked for is back:
+            # nothing to share", heard in a live sim). Consumed silently.
+            _consume_silently(run)
             continue
         delivery = run.get("delivery")
         if delivery == DELIVERED:
