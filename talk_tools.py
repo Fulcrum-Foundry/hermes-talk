@@ -844,20 +844,30 @@ def _describe_age(run: dict) -> str:
     return f" {seconds // 3600}h"
 
 
+def talk_cli_work_name(run: dict) -> str:
+    """``talk_cli.work_name`` without a module-level import cycle."""
+
+    import talk_cli
+
+    return talk_cli.work_name(run)
+
+
 def _describe_run(run: dict) -> str:
     status = run.get("status")
     raw_meta = run.get("meta")
     meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
+    # The spoken name comes FIRST so the model has words for the work; the
+    # run number is routing only (check_work/get_result/cancel_job take it
+    # back) and the tool descriptions say never to speak it.
+    name = talk_cli_work_name(run)
     if status in talk_runs.TERMINAL_STATUSES:
         # The typed outcome is what actually happened; "done"/"failed" is
         # only the local lifecycle (hermes-sip-live-voice#49).
         outcome = talk_runs.run_outcome(run)
         shown = "finished" if outcome == talk_runs.OUTCOME_SUCCESS else outcome
-        line = f"run {run.get('runId')} ({run.get('kind')}) {shown}"
+        line = f"{name} {shown} (run_id {run.get('runId')})"
     else:
-        line = f"run {run.get('runId')} ({run.get('kind')}) {status}"
-    # ``run N`` above is routing for the model (check_work/get_result/cancel_job
-    # take it back); the tool descriptions say never to speak it.
+        line = f"{name} {status} (run_id {run.get('runId')})"
     if status == "running":
         line += _describe_age(run)
         if meta.get("phase") == "awaiting_children":
@@ -905,10 +915,16 @@ def _handle_check_work(arguments: dict) -> str:
     # not listed (#71): a live handset review heard "older finished runs 12,
     # 11, 10, probably unrelated — which do you want?" on every check. Talk
     # tracks what has been shared; the caller never manages a queue.
+    # A ``lost`` run is one an EARLIER process started and this one cannot
+    # see; it is not this call's work and saying "one older task I can't
+    # see the outcome for" (heard in a live sim) is exactly the plumbing
+    # #64 removes. It stays retrievable by number for a direct question.
     runs = [
         run
         for run in talk_runs.list_runs(limit=10, include_history=True)
-        if not talk_runs.shared_with_caller(run) and not talk_runs.replaced(run)
+        if not talk_runs.shared_with_caller(run)
+        and not talk_runs.replaced(run)
+        and run.get("status") != "lost"
     ]
     working = [run for run in runs if run.get("status") not in talk_runs.TERMINAL_STATUSES]
     ready = [run for run in runs if run.get("status") in talk_runs.TERMINAL_STATUSES]

@@ -379,7 +379,7 @@ def test_snapshots_carry_the_admission_and_check_work_reads_it_out():
     assert talk_runs.get_run(run_id)["admission"]["keys"] == ["/repo", "prod"]
 
     spoken = talk_tools.execute_talk_tool("check_work", {})
-    assert f"run {run_id} (agent) running" in spoken
+    assert f"running (run_id {run_id})" in spoken
     assert "holding '/repo', 'prod'" in spoken
     gate.release.set()
 

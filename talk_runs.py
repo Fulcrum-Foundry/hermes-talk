@@ -372,7 +372,11 @@ def current_owner() -> dict | None:
 def started_sentinel(run_id: int, kind: str, label: str) -> str:
     """The receipt a tool handler returns so the session starts polling."""
 
-    return f"WORK_STARTED #{run_id} kind={kind} ({label})"
+    return (
+        f"WORK_STARTED #{run_id} kind={kind} ({label}) — say only that you're on it, "
+        "in a few words, naming the work by what it is; no numbers, no 'background', "
+        "no 'task' or 'job'."
+    )
 
 
 _STARTED_RE = re.compile(r"WORK_STARTED #(\d+) kind=")

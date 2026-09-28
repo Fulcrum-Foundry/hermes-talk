@@ -476,7 +476,7 @@ def test_check_work_lists_a_running_run():
 
     result = talk_tools.execute_talk_tool("check_work", {})
 
-    assert f"run {run_id} (agent) running" in result
+    assert f"running (run_id {run_id})" in result and "The audit" in result
     gate.set()
 
 
@@ -485,7 +485,7 @@ def test_check_work_lists_a_finished_run():
     _wait_terminal(run_id)
 
     result = talk_tools.execute_talk_tool("check_work", {})
-    assert f"run {run_id} (agent) finished" in result  # the outcome, not the lifecycle word
+    assert f"finished (run_id {run_id})" in result  # the outcome, not the lifecycle word
     assert f"check_work with run_id {run_id}" in result
     assert "the index is rebuilt" not in result
 
@@ -544,8 +544,8 @@ def test_check_work_groups_working_and_ready_not_yet_shared():
         gate.set()
     assert result.startswith("Working: ")
     assert "Ready, not yet shared: " in result
-    assert f"run {running} (agent) running" in result
-    assert f"run {finished} (agent) finished" in result
+    assert f"running (run_id {running})" in result
+    assert f"finished (run_id {finished})" in result
 
 
 def test_check_work_hides_a_result_already_delivered_to_the_caller():
@@ -573,7 +573,7 @@ def test_check_work_hides_a_result_claimed_by_an_earlier_call_but_lists_our_own_
     result = talk_tools.execute_talk_tool("check_work", {})
 
     assert f"run {older}" not in result, "an earlier call was speaking it; not ours to re-list"
-    assert f"run {ours} (agent) finished" in result, "our own in-flight claim is still unshared"
+    assert f"finished (run_id {ours})" in result, "our own in-flight claim is still unshared"
     assert talk_runs.shared_with_caller(talk_runs.get_run(older))
     assert not talk_runs.shared_with_caller(talk_runs.get_run(ours))
 
@@ -674,7 +674,7 @@ def test_steer_by_replace_cancels_the_original_and_starts_one_widened_job(monkey
     assert not talk_runs.replaced(replacement)
     # Only the replacement is visible; the cancelled original is machinery.
     listing = talk_tools.execute_talk_tool("check_work", {})
-    assert f"run {new_id}" in listing and f"run {original}" not in listing
+    assert f"run_id {new_id}" in listing and f"run_id {original}" not in listing
 
 
 def test_steer_by_replace_carries_the_admission_declaration(monkeypatch):
@@ -758,8 +758,11 @@ def test_check_work_reports_a_previous_session_as_lost(monkeypatch, tmp_path):
 
     result = talk_tools.execute_talk_tool("check_work", {})
 
-    assert "run 3 (agent) lost" in result
-    assert "can't see how it ended" in result
+    # A run from an EARLIER process is not this call's work: the listing
+    # hides it (sip #64/#71); asking for it by number still answers.
+    assert "left running" not in result and "lost" not in result
+    lost = [r for r in talk_runs.list_runs(limit=10, include_history=True) if r.get("runId") == 3]
+    assert lost and lost[0]["status"] == "lost"  # still in the registry, just not spoken
 
 
 class _StubCtx:
