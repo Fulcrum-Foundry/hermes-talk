@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -184,6 +185,13 @@ _TOOL_DELEGATE_TASK: dict = {
                     "Two to four plain words naming the work the way you would say "
                     "it aloud: 'the GBrain check', 'your text', 'the weather lookup'. "
                     "Every later mention of this work uses this name."
+                ),
+            },
+            "quiet_on_success": {
+                "type": "boolean",
+                "description": (
+                    "True when you have already told the caller the outcome "
+                    "(\"Sent.\"); a success is then never announced, only a failure."
                 ),
             },
             "background": {
@@ -830,7 +838,7 @@ def _handle_delegate_task(arguments: dict) -> str:
         if question:
             return f"I can't tell which target you mean. {question}"
     name = " ".join(str(arguments.get("name") or "").split())[:60]
-    return talk_host.host().run_agent(
+    receipt = talk_host.host().run_agent(
         brief.render(),
         background is not False,
         execution_mode=mode,
@@ -838,6 +846,13 @@ def _handle_delegate_task(arguments: dict) -> str:
         brief=brief,
         label=name or None,
     )
+    if arguments.get("quiet_on_success") and isinstance(receipt, str):
+        # "Text me …": the model already said "Sent" (#66). A success is
+        # consumed without speech; only a failure comes back at a pause.
+        match = re.match(r"WORK_STARTED #(\d+)", receipt)
+        if match:
+            talk_runs.annotate_run(int(match.group(1)), quiet_on_success=True)
+    return receipt
 
 
 def _describe_age(run: dict) -> str:

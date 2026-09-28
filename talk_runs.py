@@ -1271,10 +1271,13 @@ def list_undelivered_for_session(
     for run in merged.values():
         if run.get("status") not in TERMINAL_STATUSES:
             continue
-        if run_outcome(run) == OUTCOME_CANCELLED:
-            # The operator asked for this stop on an earlier call; it is
-            # not news on the next one ("the work you asked for is back:
-            # nothing to share", heard in a live sim). Consumed silently.
+        outcome = run_outcome(run)
+        quiet = bool((run.get("meta") or {}).get("quiet_on_success"))
+        if outcome == OUTCOME_CANCELLED or (outcome == OUTCOME_SUCCESS and quiet):
+            # A stop the operator asked for on an earlier call, or a success
+            # they were already told about ("Sent."): not news on the next
+            # call ("the work you asked for is back: nothing to share", heard
+            # in a live sim). Consumed silently.
             _consume_silently(run)
             continue
         delivery = run.get("delivery")

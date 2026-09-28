@@ -2338,6 +2338,15 @@ async def run_talk_session(
                         if talk_runs.claim_delivery(run_id, claimant=talk_session_id):
                             _delivered(run_id)
                         return
+                    if (
+                        talk_runs.run_outcome(run) == talk_runs.OUTCOME_SUCCESS
+                        and (run.get("meta") or {}).get("quiet_on_success")
+                    ):
+                        # The model already told the caller the outcome
+                        # ("Sent."); a second mention is noise (#66). Consumed.
+                        if talk_runs.claim_delivery(run_id, claimant=talk_session_id):
+                            _delivered(run_id)
+                        return
                     if talk_runs.replaced(run):
                         # Steered by replace (#72): the widened successor
                         # carries the request; this outcome is consumed

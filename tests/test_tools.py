@@ -909,3 +909,20 @@ def test_delegate_task_name_is_the_spoken_label(monkeypatch):
     assert talk_cli.work_name({"label": "your text", "meta": {"named": True}}) == "Your text"
     assert talk_cli.work_name({"label": "Text me: hey there"}) == "The Text me: hey there work"
 
+
+def test_delegate_task_quiet_on_success_is_noted_on_the_run(monkeypatch):
+    """'Text me …' with quiet_on_success: the model said 'Sending it now'; a success is
+    consumed silently, only a failure is spoken (sip #66)."""
+
+    class _Host:
+        def run_agent(self, task, background=True, **kw):
+            return "WORK_STARTED #41 kind=agent (x)"
+
+    noted: dict = {}
+    monkeypatch.setattr(talk_host, "host", lambda: _Host())
+    monkeypatch.setattr(talk_runs, "annotate_run", lambda rid, **f: noted.update(rid=rid, **f))
+    talk_tools.execute_talk_tool(
+        "delegate_task", {"task": "Text me: hi", "name": "your text", "quiet_on_success": True}
+    )
+    assert noted == {"rid": 41, "quiet_on_success": True}
+
