@@ -36,8 +36,9 @@ from collections.abc import Callable
 from typing import Any
 
 try:
-    from . import talk_controls, talk_realtime, talk_runs
+    from . import talk_brief, talk_controls, talk_realtime, talk_runs
 except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path load)
+    import talk_brief
     import talk_controls
     import talk_realtime
     import talk_runs
@@ -204,23 +205,23 @@ class Scheduler:
         if not fresh:
             return []
         parts: list[str] = []
+        ids: list[str] = []
         for rid in fresh[:NOTICE_LABELS]:
             run = self._get_run(rid) or {}
-            label = str(run.get("label") or "").strip()[:_LABEL_CHARS]
-            verb = (
-                "finished"
-                if talk_runs.run_outcome(run) == talk_runs.OUTCOME_SUCCESS
-                else (talk_runs.run_outcome(run))
-            )
-            parts.append(f"run {rid}" + (f" ({label})" if label else "") + f" {verb}")
+            label = talk_brief.spoken_label(run.get("label"))
+            outcome = talk_runs.run_outcome(run)
+            verb = "is done" if outcome == talk_runs.OUTCOME_SUCCESS else f"ended ({outcome})"
+            parts.append((f"the {label} work" if label else "something you asked for") + f" {verb}")
+            ids.append(str(rid))
         more = len(fresh) - len(parts)
         listing = "; ".join(parts) + (f"; and {more} more" if more > 0 else "")
         count = len(fresh)
-        noun = "one background job is" if count == 1 else f"{count} background jobs are"
+        noun = "one thing you asked for is" if count == 1 else f"{count} things you asked for are"
         headline = (
             f"Natural pause: {noun} ready — {listing}. Offer this in ONE short "
             "sentence and ask whether they want it now; if they say later, drop it "
-            "until asked. Do not read any result."
+            f"until asked. Do not read any result. (run_ids {', '.join(ids)} — for your "
+            "tool calls only; never say the numbers aloud.)"
         )
         return _notice(headline)
 

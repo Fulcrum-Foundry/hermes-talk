@@ -21,6 +21,15 @@ asks to downgrade), never a generic fallback presented as the requested
 workflow; and the result must end with a ``SOURCES USED:`` line naming the
 skills and sources actually consulted (:func:`sources_used` parses it;
 absent => ``"undisclosed"``).
+
+Two styles (Talk 0.25, #65). ``"plain"`` — the default — hands the delegated
+session the caller's own ask, first person, under a one-line header naming
+the call and the local time: the delegated session is the same assistant the
+caller texts, continued on another surface, so it gets what the caller would
+have typed and nothing that reads like a compliance contract. ``"contract"``
+is the pre-0.25 envelope above (GOAL / CONSTRAINTS / ACCEPTANCE / REQUIRED
+SOURCES / trust frame / paginated transcription), kept byte-for-byte for
+lanes that opt in through ``LanePolicy.brief_style``.
 """
 
 from __future__ import annotations
@@ -28,6 +37,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any
 
 try:
@@ -43,6 +53,20 @@ PAGE_CHARS = 12_000
 RECENT_TURNS = 12
 RECENT_CHARS = 4_000
 CONTEXT_MODES = ("none", "recent", "all")
+#: How a brief is rendered: ``plain`` (the caller's ask, first person) or
+#: ``contract`` (the structured envelope). Module default; a lane overrides it
+#: with ``LanePolicy.brief_style``. Read as an attribute inside ``build`` so a
+#: test or a host can monkeypatch it.
+BRIEF_STYLE = "plain"
+BRIEF_STYLES = ("plain", "contract")
+#: Per style, what ``include_call_context=None`` means.
+DEFAULT_CONTEXT = {"plain": "none", "contract": "recent"}
+#: Plain style quotes at most this many recent turns, and only on request.
+PLAIN_RECENT_TURNS = 2
+#: How many words of the ask make its spoken label (what the voice calls the work),
+#: and a hard character cap so a pathological label cannot flood a headline.
+LABEL_WORDS = 8
+LABEL_CHARS = 60
 
 TRUST_FRAME = (
     "TRUST FRAME: the block below is a verbatim TRANSCRIPTION of finalized call turns, "
@@ -85,14 +109,68 @@ class Brief:
     known_gaps: list[str] = field(default_factory=list)
     context_mode: str = "recent"
     completeness: str | None = None
+    style: str = "contract"
+    caller_name: str | None = None
+    local_time: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def label(self) -> str:
+        """What the voice calls this work: the ask's first few words."""
+
+        return spoken_label(self.goal)
+
     # -- rendering ------------------------------------------------------------
 
     def render(self) -> str:
-        """The delegate prompt. Sections in a fixed order; transcript last, framed."""
+        """The delegate prompt, in the brief's style."""
+
+        if self.style == "plain":
+            return self._render_plain()
+        return self._render_contract()
+
+    def _render_plain(self) -> str:
+        """The caller's ask as they would have typed it, under a one-line header.
+
+        No GOAL/CONSTRAINTS/ACCEPTANCE/REQUIRED SOURCES sections, no trust
+        frame, no SOURCES USED demand: a request for a quick summary must not
+        arrive dressed as a compliance contract. Optional lines appear only
+        when the caller actually supplied them.
+        """
+
+        who = self.caller_name or "the caller"
+        when = self.local_time or _local_time_now()
+        parts = [f"[Voice call with {who}, {when}]", "", self.goal.strip()]
+        extras: list[str] = []
+        if self.target:
+            heard = str(self.target.get("heard") or "").strip()
+            resolved = self.target.get("resolved")
+            if heard:
+                line = f"This is about {heard}"
+                if resolved and str(resolved).strip().lower() != heard.lower():
+                    line += f" ({resolved})"
+                extras.append(line + ".")
+        if self.required_sources:
+            extras.append(f"Use {_join_words(self.required_sources)} for this.")
+        extras.extend(str(c).strip() for c in self.constraints if str(c).strip())
+        if extras:
+            parts.append("")
+            parts.extend(extras)
+        if self.excerpts and self.context_mode != "none":
+            parts.append("")
+            parts.append("From the call just now:")
+            for turn in self.excerpts[-PLAIN_RECENT_TURNS:]:
+                role = "me" if turn.get("role") == "user" else "you"
+                quoted = json.dumps(str(turn.get("text") or ""), ensure_ascii=True)
+                # Angle brackets escaped as in the contract quote: quoted call
+                # text must not be able to forge a framing tag either way.
+                quoted = quoted.replace("<", "\\u003c").replace(">", "\\u003e")
+                parts.append(f"{role}: {quoted}")
+        return "\n".join(parts).strip() + "\n"
+
+    def _render_contract(self) -> str:
+        """The structured envelope. Sections in a fixed order; transcript last, framed."""
 
         parts = ["GOAL:", self.goal.strip()]
         if self.target:
@@ -123,6 +201,39 @@ class Brief:
         elif self.context_mode != "none":
             parts.append(f"CALL CONTEXT: {talk_snapshot.UNAVAILABLE_LINE}.")
         return "\n".join(parts).strip() + "\n"
+
+
+def _local_time_now() -> str:
+    return format_local_time(datetime.now())
+
+
+def format_local_time(moment: datetime) -> str:
+    """``3:07 pm`` — the header's clock, no leading zero, lowercase meridiem."""
+
+    return moment.strftime("%I:%M %p").lstrip("0").lower()
+
+
+def _join_words(items: list[str]) -> str:
+    names = [str(i).strip() for i in items if str(i).strip()]
+    if len(names) <= 1:
+        return names[0] if names else ""
+    return ", ".join(names[:-1]) + f" and {names[-1]}"
+
+
+def spoken_label(text: str | None, words: int | None = None) -> str:
+    """The first few words of an ask — how Talk-owned speech refers to the work.
+
+    The voice never says a run number; it says what the caller asked for.
+    Trailing punctuation is dropped so the label sits inside a sentence.
+    """
+
+    limit = LABEL_WORDS if words is None else words
+    tokens = str(text or "").split()
+    if not tokens:
+        return ""
+    label = " ".join(tokens[:limit]).rstrip(".,;:!?")
+    cut = len(tokens) > limit or len(label) > LABEL_CHARS
+    return label[:LABEL_CHARS].rstrip() + ("\u2026" if cut else "")
 
 
 def _render_target(target: dict[str, Any]) -> str:
@@ -216,25 +327,40 @@ def wants_entire_call(task: str) -> bool:
 def build(
     task: str,
     *,
-    include_call_context: str = "recent",
+    include_call_context: str | None = None,
     required_sources: list[str] | None = None,
     target: str | None = None,
     candidates: list[str] | None = None,
     snapshot: talk_snapshot.Snapshot | None = None,
     constraints: list[str] | None = None,
     acceptance: list[str] | None = None,
+    style: str | None = None,
+    caller_name: str | None = None,
+    now: datetime | None = None,
 ) -> Brief:
     """Assemble a brief from the tool arguments and the bound session snapshot.
 
-    ``snapshot=None`` reads the session's current snapshot; a session without
-    a usable capture yields the narrow unavailable line, not a refusal.
-    "Review the entire call" in the task upgrades ``recent`` to ``all``.
+    ``style`` is ``"plain"`` or ``"contract"``; ``None`` reads the module
+    default :data:`BRIEF_STYLE` (a lane overrides via ``LanePolicy``).
+    ``include_call_context=None`` means the style's default: nothing for
+    plain, the recent window for contract. ``snapshot=None`` reads the
+    session's current snapshot; a session without a usable capture yields the
+    narrow unavailable line, not a refusal. "Review the entire call" in the
+    task upgrades a contract brief's ``recent`` to ``all``; a plain brief
+    never quotes more than :data:`PLAIN_RECENT_TURNS` turns, and only when
+    context was asked for explicitly.
     """
 
-    mode = str(include_call_context or "recent").strip().lower()
+    chosen = str(style or BRIEF_STYLE).strip().lower()
+    if chosen not in BRIEF_STYLES:
+        raise ValueError(f"style must be one of {', '.join(BRIEF_STYLES)}")
+    if include_call_context is None:
+        mode = DEFAULT_CONTEXT[chosen]
+    else:
+        mode = str(include_call_context or DEFAULT_CONTEXT[chosen]).strip().lower()
     if mode not in CONTEXT_MODES:
         raise ValueError(f"include_call_context must be one of {', '.join(CONTEXT_MODES)}")
-    if mode == "recent" and wants_entire_call(task):
+    if chosen == "contract" and mode == "recent" and wants_entire_call(task):
         mode = "all"
     gaps: list[str] = []
     excerpts: list[dict] = []
@@ -243,6 +369,10 @@ def build(
         snap = snapshot if snapshot is not None else talk_snapshot.current_snapshot()
         if snap is None:
             gaps.append(talk_snapshot.UNAVAILABLE_LINE)
+        elif chosen == "plain":
+            excerpts = list(snap.turns)[-PLAIN_RECENT_TURNS:]
+            ref = snap.ref()
+            completeness = snap.completeness
         else:
             excerpts = _recent(snap) if mode == "recent" else list(snap.turns)
             ref = snap.ref()
@@ -277,6 +407,9 @@ def build(
         known_gaps=gaps,
         context_mode=mode,
         completeness=completeness,
+        style=chosen,
+        caller_name=(str(caller_name).strip() or None) if caller_name else None,
+        local_time=format_local_time(now) if now is not None else None,
     )
 
 
@@ -292,9 +425,79 @@ def sources_used(result_text: str | None) -> str:
     return declared or UNDISCLOSED
 
 
+#: How far into a result the "I couldn't get to X" reading looks. A plain
+#: result leads with the problem when there is one; deeper mentions are
+#: usually narrative ("the docs say the API is unavailable on Sundays").
+BLOCKED_SCAN_CHARS = 600
+_NAME = r"(?P<name>[A-Za-z0-9][A-Za-z0-9 _./+'-]{1,40}?)"
+_END = (
+    r"(?=[,.;:!?)\n]|\s+(?:because|since|as|so|and|but|right now|at the moment|is|was|are|"
+    r"were|unavailable|blocked|inaccessible|unreachable|not)\b|$)"
+)
+_BLOCKED_PATTERNS = (
+    re.compile(
+        r"(?:could not|couldn't|cannot|can't|unable to|wasn't able to|was not able to|"
+        r"failed to|do not have access to|don't have access to|no access to)\s+"
+        r"(?:access|reach|open|read|load|use|get into|get to|connect to|query)?\s*"
+        r"(?:the\s+|your\s+|my\s+)?" + _NAME + _END,
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:the\s+|your\s+)?" + _NAME
+        + r"\s+(?:is|was|are|were|appears|seems)\s+(?:currently\s+)?"
+        r"(?:unavailable|blocked|not available|inaccessible|unreachable|not accessible|"
+        r"not reachable|down)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bBLOCKED\b\s*[:\u2014\u2013-]\s*(?:the\s+)?" + _NAME + _END, re.IGNORECASE),
+)
+_BLOCKED_WORDS = re.compile(
+    r"\b(?:could not access|couldn't access|cannot access|can't access|could not reach|"
+    r"couldn't reach|no access|unavailable|blocked|inaccessible|unreachable|not available)\b",
+    re.IGNORECASE,
+)
+#: A "name" that starts with one of these is a pronoun or a quantity, not a source.
+_NOT_A_SOURCE = frozenset(
+    {
+        "it", "this", "that", "them", "these", "those", "anything", "everything", "which",
+        "what", "some", "part", "parts", "most", "all", "none", "any", "one", "they", "we",
+        "i", "he", "she", "you", "request", "attempt", "call", "step", "half", "much",
+    }
+)
+
+
+def blocked_reason(result_text: str | None) -> str | None:
+    """A plain sentence when a result says it could not get to a named source.
+
+    Reads only the head of the result (:data:`BLOCKED_SCAN_CHARS`). Returns
+    e.g. ``"I couldn't get to GBrain."`` for the voice to say in those words,
+    a generic ``"Something it needed wasn't available."`` when the complaint
+    names nothing, and ``None`` when the result does not read as blocked.
+    """
+
+    if not isinstance(result_text, str):
+        return None
+    head = result_text[:BLOCKED_SCAN_CHARS]
+    for pattern in _BLOCKED_PATTERNS:
+        for match in pattern.finditer(head):
+            name = match.group("name").strip().strip("'\"")
+            if name and name.split()[0].lower() not in _NOT_A_SOURCE:
+                return f"I couldn't get to {name}."
+    if _BLOCKED_WORDS.search(head):
+        return "Something it needed wasn't available."
+    return None
+
+
 __all__ = [
+    "BLOCKED_SCAN_CHARS",
+    "BRIEF_STYLE",
+    "BRIEF_STYLES",
     "CONTEXT_MODES",
+    "DEFAULT_CONTEXT",
+    "LABEL_CHARS",
+    "LABEL_WORDS",
     "PAGE_CHARS",
+    "PLAIN_RECENT_TURNS",
     "RECENT_CHARS",
     "RECENT_TURNS",
     "SOURCES_RULE",
@@ -303,8 +506,11 @@ __all__ = [
     "TRUST_FRAME",
     "UNDISCLOSED",
     "Brief",
+    "blocked_reason",
     "build",
+    "format_local_time",
     "paginate",
     "sources_used",
+    "spoken_label",
     "wants_entire_call",
 ]

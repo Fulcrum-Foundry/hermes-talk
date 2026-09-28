@@ -46,6 +46,7 @@ try:
         talk_audio,
         talk_auth,
         talk_binding,
+        talk_brief,
         talk_capabilities,
         talk_cascade_voice,
         talk_check,
@@ -82,6 +83,7 @@ except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path
     import talk_audio
     import talk_auth
     import talk_binding
+    import talk_brief
     import talk_capabilities
     import talk_cascade_voice
     import talk_check
@@ -989,7 +991,9 @@ def landed_note_commands(subagent_id: str) -> list[talk_realtime.RealtimeCommand
     if not subagent_id:
         return []
     return _announcement_commands(
-        f"The steering note to {subagent_id} just landed — the agent has it.", ""
+        f"Your note just reached the work it was meant for ({subagent_id}) — it has it "
+        "now. Say that in plain words; never say the id aloud.",
+        "",
     )
 
 
@@ -1003,11 +1007,11 @@ def run_finished_messages(run: dict) -> list[dict]:
 
 
 #: Outcome category → the verb the operator hears (hermes-sip-live-voice#49).
-#: Only ``success`` may say "finished". Every other category names what
+#: Only ``success`` may say "is done". Every other category names what
 #: actually happened; an unknown category says so rather than guessing.
 _OUTCOME_VERBS = {
-    talk_runs.OUTCOME_SUCCESS: "finished",
-    talk_runs.OUTCOME_FAILED: "failed",
+    talk_runs.OUTCOME_SUCCESS: "is done",
+    talk_runs.OUTCOME_FAILED: "didn't go through",
     talk_runs.OUTCOME_CANCELLED: "was cancelled",
     talk_runs.OUTCOME_INTERRUPTED: "was interrupted before it finished",
     talk_runs.OUTCOME_TIMEOUT: "ran out of time and was abandoned",
@@ -1015,26 +1019,44 @@ _OUTCOME_VERBS = {
     talk_runs.OUTCOME_UNKNOWN: "ended in an unknown state",
 }
 
+#: The trailer every result headline carries: the run number rides for the
+#: model's own routing (get_result/cancel_job take it back) and is never to be
+#: spoken (Talk 0.25, #70).
+_SILENT_ID = " (run_id {run_id} — for your tool calls only; never say the number aloud.)"
+
+
+def work_name(run: dict | None) -> str:
+    """How Talk-owned speech names a piece of work: by its label, never 'run N'.
+
+    ``"The weather lookup"`` from a label of ``"weather lookup for Indy"``;
+    ``"The work you asked for"`` when there is no label at all.
+    """
+
+    label = talk_brief.spoken_label((run or {}).get("label"))
+    return f"The {label} work" if label else "The work you asked for"
+
 
 def run_finished_commands(run: dict) -> list[talk_realtime.RealtimeCommand]:
     """Provider-neutral commands that make the model speak a terminal run.
 
     The verb comes from the run's typed outcome, never from the two-valued
-    local status alone: a cancelled, interrupted or unfinished job is named
-    as such, and the trailing output is framed as PARTIAL for anything that
-    is not a success so the model cannot present it as the answer.
+    local status alone: a cancelled, interrupted or unfinished piece of work
+    is named as such, and the trailing output is framed as PARTIAL for
+    anything that is not a success so the model cannot present it as the
+    answer. The headline names the work by its label — machinery words (run,
+    job, lane, session, delegation, receipt) never reach the caller's ear.
     """
 
     tail = str(run.get("output") or "").strip()[-WATCH_OUTPUT_TAIL_CHARS:]
     outcome = talk_runs.run_outcome(run)
     verb = _OUTCOME_VERBS.get(outcome, _OUTCOME_VERBS[talk_runs.OUTCOME_UNKNOWN])
-    label = str(run.get("label") or "").strip()[:_PROGRESS_LABEL_CHARS]
-    label_part = f" ({label})" if label else ""
-    headline = f"Background run #{run.get('runId')}{label_part} {verb}" + (
-        "." if tail else " with no output."
-    )
+    headline = f"{work_name(run)} {verb}" + ("." if tail else ", with nothing to show.")
+    blocked = talk_brief.blocked_reason(tail) if tail else None
+    if blocked:
+        headline += f" Say it plainly: {blocked}"
     if outcome != talk_runs.OUTCOME_SUCCESS and tail:
         headline += " What follows is partial or diagnostic output, not a completed result."
+    headline += _SILENT_ID.format(run_id=run.get("runId"))
     return _announcement_commands(headline, tail)
 
 
@@ -1076,11 +1098,10 @@ def subagent_stop_commands(event: dict) -> list[talk_realtime.RealtimeCommand]:
     if verb is None:
         verb = f"finished ({status})" if status else "finished"
     role = str(event.get("role") or "").strip()
-    role_part = f" ({role})" if role else ""
     tail = str(event.get("summary") or "").strip()[-WATCH_OUTPUT_TAIL_CHARS:]
-    headline = f"Background agent {subagent_id}{role_part} {verb}" + (
-        "." if tail else " with no summary."
-    )
+    headline = f"The {role} work" if role else "Part of the work you asked for"
+    headline += f" {verb}" + ("." if tail else ", with nothing to show.")
+    headline += f" (id {subagent_id} — for your tool calls only; never say it aloud.)"
     return _announcement_commands(headline, tail)
 
 
@@ -1116,21 +1137,21 @@ def run_phase_commands(run: dict, kind: str) -> list[talk_realtime.RealtimeComma
     run_id = run.get("runId")
     if run_id is None:
         return []
-    label = str(run.get("label") or "").strip()[:_PROGRESS_LABEL_CHARS]
-    label_part = f" ({label})" if label else ""
+    name = work_name(run)
     if kind == "heartbeat":
-        headline = f"Background run #{run_id}{label_part} is still working."
+        headline = f"{name} is still going."
     elif kind == talk_progress.PHASE_ACCEPTED:
-        headline = f"Background run #{run_id}{label_part} was accepted."
+        headline = f"{name} is underway."
     elif kind == talk_progress.PHASE_EXECUTING:
         meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
         detail = str(meta.get("phase_detail") or "").strip()[:_PROGRESS_LABEL_CHARS]
-        headline = f"Background run #{run_id}{label_part} is executing"
+        headline = f"{name} is in progress"
         headline += f" — {detail}." if detail else "."
     elif kind == talk_progress.PHASE_BLOCKED:
-        headline = f"Background run #{run_id}{label_part} is waiting on an approval."
+        headline = f"{name} is waiting on an approval."
     else:
         return []
+    headline += _SILENT_ID.format(run_id=run_id)
     return _announcement_commands(headline, "")
 
 
@@ -1155,19 +1176,18 @@ def subagent_phase_commands(event: dict) -> list[talk_realtime.RealtimeCommand]:
         return []
     phase = str(event.get("phase") or "")
     role = str(event.get("role") or "").strip()
-    role_part = f" ({role})" if role else ""
+    name = f"The {role} work" if role else "Part of the work you asked for"
     if phase == talk_progress.PHASE_ACCEPTED:
-        headline = f"Background agent {subagent_id}{role_part} was accepted."
+        headline = f"{name} is underway."
     elif phase == talk_progress.PHASE_EXECUTING:
         detail = str(event.get("detail") or "").strip()[:_PROGRESS_LABEL_CHARS]
-        headline = f"Background agent {subagent_id}{role_part} is executing"
+        headline = f"{name} is in progress"
         headline += f" — {detail}." if detail else "."
     elif phase == talk_progress.PHASE_BLOCKED:
-        headline = (
-            f"Background agent {subagent_id}{role_part} is waiting on an approval."
-        )
+        headline = f"{name} is waiting on an approval."
     else:
         return []
+    headline += f" (id {subagent_id} — for your tool calls only; never say it aloud.)"
     return _announcement_commands(headline, "")
 
 
@@ -1189,13 +1209,16 @@ def approval_prompt_commands(event: dict) -> list[talk_realtime.RealtimeCommand]
     request = str(event.get("request") or "").strip()
     options = ["'once' to allow it just this time"]
     if "session" in choices:
-        options.append("'session' to allow it for the rest of the run")
+        options.append("'session' to allow it for the rest of this work")
     options.append("or 'no' to deny")
+    name = work_name(talk_runs.get_run(int(run_id)) if isinstance(run_id, int) else None)
     headline = (
-        f"Background run #{run_id} is waiting for approval. Ask the operator "
-        "out loud: "
+        f"{name} needs an okay from the operator before it goes on. Ask them out "
+        "loud, in plain words, what it wants to do and whether that's fine: "
         + ", ".join(options)
         + ". If they interrupt the question or do not answer, it is denied."
+        + _SILENT_ID.format(run_id=run_id)
+        + " Pass that run_id to resolve_approval with their answer."
     )
     return _announcement_commands(headline, request)
 
@@ -1212,18 +1235,20 @@ def approval_outcome_commands(event: dict) -> list[talk_realtime.RealtimeCommand
     if run_id is None:
         return []
     outcome = event.get("outcome")
+    name = work_name(talk_runs.get_run(int(run_id)) if isinstance(run_id, int) else None)
     if outcome == "timeout":
         headline = (
-            f"Background run #{run_id}'s approval got no answer in time, so it "
-            "was denied — silence is not consent."
+            f"{name} asked for an okay and got no answer in time, so the answer "
+            "was no — silence is not consent."
         )
     elif outcome == "barge_in":
         headline = (
-            f"Background run #{run_id}'s approval question was interrupted, so "
-            "it was denied — interrupting a question never approves it."
+            f"{name} asked for an okay and the question was interrupted, so the "
+            "answer was no — interrupting a question never approves it."
         )
     else:
         return []
+    headline += _SILENT_ID.format(run_id=run_id)
     return _announcement_commands(headline, "")
 
 
@@ -1840,6 +1865,7 @@ async def run_talk_session(
     # lane's own end_call is wrapped below so "closing" is set even by a lane
     # that never heard of talk_controls.
     talk_controls.attach_session()
+    talk_lane.attach_policy(policy)
     try:
         tools = (
             host_execution_attachment.tool_definitions()
@@ -1867,6 +1893,7 @@ async def run_talk_session(
         if host_execution_attachment is not None:
             host_execution_attachment.close()
         talk_controls.detach_session()
+        talk_lane.detach_policy()
         return refuse(STARTUP_REFUSAL_TOOLS)
     # The live-catalog section rides every lane. A cold process used to lose
     # the race between the background warm above and this mint — the FIRST
@@ -2043,6 +2070,7 @@ async def run_talk_session(
         talk_progress.detach_session()
         talk_approvals.detach_session()
         talk_controls.detach_session()
+        talk_lane.detach_policy()
         if authorization_ledger is not None:
             authorization_ledger.clear()
         audio.stop()
@@ -2062,6 +2090,7 @@ async def run_talk_session(
         talk_progress.detach_session()
         talk_approvals.detach_session()
         talk_controls.detach_session()
+        talk_lane.detach_policy()
         if authorization_ledger is not None:
             authorization_ledger.clear()
         audio.stop()
@@ -2636,6 +2665,7 @@ async def run_talk_session(
             talk_pause.detach_session(audio)
             talk_announce.detach_session()
             talk_controls.detach_session()
+            talk_lane.detach_policy()
             sender.cancel()
             pump.cancel()
             receiver.cancel()
@@ -2682,6 +2712,7 @@ async def run_talk_session(
         talk_pause.detach_session(audio)
         talk_announce.detach_session()
         talk_controls.detach_session()
+        talk_lane.detach_policy()
         if keyboard_stop is not None:
             keyboard_stop()
         if authorization_ledger is not None:

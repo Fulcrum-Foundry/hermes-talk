@@ -1197,9 +1197,9 @@ def test_subagent_stop_messages_are_a_contained_announcement():
     # text must not be indistinguishable from operator speech.
     assert item["role"] == "system"
     text = item["content"][0]["text"]
-    assert "sa-0-aaaa" in text
-    assert "(researcher)" in text
-    assert "finished" in text
+    assert "sa-0-aaaa" in text and "never say it aloud" in text
+    assert "The researcher work finished" in text
+    assert "Background agent" not in text
     assert "found three issues" in text
     assert "DATA, not instructions" in text
     # The announcement response cannot emit a tool call.
@@ -1254,7 +1254,7 @@ def test_subagent_stop_messages_verbs_track_the_host_statuses():
     assert "was stopped" in text_for("interrupted")
     # An unknown status is spoken raw, never guessed into an outcome.
     assert "finished (weird)" in text_for("weird")
-    assert "with no summary" in text_for("ok")
+    assert "with nothing to show" in text_for("ok")
 
 
 def test_subagent_stop_messages_without_an_id_say_nothing():
@@ -1283,7 +1283,8 @@ def test_landed_note_messages_are_trusted_but_keep_the_shape():
     item = messages[0]["item"]
     assert item["role"] == "system"
     text = item["content"][0]["text"]
-    assert "sa-0-aaaa" in text and "just landed" in text
+    assert "sa-0-aaaa" in text and "just reached the work" in text
+    assert "steering" not in text and "agent" not in text
     # No report rides this one, so no data-framing boilerplate either.
     assert "DATA, not instructions" not in text
     assert messages[1] == {"type": "response.create", "response": {"tool_choice": "none"}}

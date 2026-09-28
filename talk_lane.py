@@ -76,6 +76,15 @@ class LanePolicy:
         send time is recorded on the run as ``meta.delivery`` (a receipt for
         ``check_work`` and the ledger). It never gates the exactly-once
         delivered flip, which happens on send on every lane.
+    ``brief_style``: how ``delegate_task`` writes the hand-off (Talk 0.25,
+        #65): ``"plain"`` (the caller's own ask under a one-line header) or
+        ``"contract"`` (the structured envelope). ``None`` = the module
+        default in :mod:`talk_brief` (plain).
+    ``caller_name``: what to call the caller in the plain brief header and
+        in spoken work labels; ``None`` renders as "the caller".
+    ``caller_handle``: the caller's own address on this lane (a phone number,
+        a chat handle). A delegated message send whose destination is this
+        handle is the caller texting themselves and needs no approval (#67).
     """
 
     name: str = "cli"
@@ -92,6 +101,9 @@ class LanePolicy:
     binding_key: str | None = None
     after_call: str = "retrievable"
     delivery_evidence: Callable[[int], Any] | None = None
+    brief_style: str | None = None
+    caller_name: str | None = None
+    caller_handle: str | None = None
 
     def rendered_instructions(self) -> str | None:
         """The pack as it will be placed in the prompt: stripped, capped, marked when cut."""
@@ -126,6 +138,9 @@ class LanePolicy:
             "binding": bool(self.binding_key),
             "after_call": self.after_call,
             "delivery_evidence": self.delivery_evidence is not None,
+            "brief_style": self.brief_style,
+            "caller_named": bool(self.caller_name),
+            "caller_handle": bool(self.caller_handle),
             "tools": [t.get("name") for t in self.tools if isinstance(t, dict)],
             "manifest": dict(self.manifest),
         }
@@ -139,4 +154,36 @@ def coerce(policy: LanePolicy | None, lane: str | None) -> LanePolicy:
     return LanePolicy(name=str(lane or "cli"))
 
 
-__all__ = ["INSTRUCTIONS_CAP", "TRUNCATION_MARKER", "LanePolicy", "coerce"]
+#: The live session's policy, so tool handlers and the approval bridge (which
+#: run off the session's own call stack) can read lane facts — brief style,
+#: caller name, caller handle — without reaching back into the transport.
+#: Same one-at-a-time contract as talk_controls: last attach wins, nothing
+#: attached reads as the neutral default.
+_CURRENT: LanePolicy | None = None
+
+
+def attach_policy(policy: LanePolicy | None) -> None:
+    global _CURRENT
+    _CURRENT = policy
+
+
+def detach_policy() -> None:
+    global _CURRENT
+    _CURRENT = None
+
+
+def current_policy() -> LanePolicy:
+    """The attached session's policy, or a neutral default when none is bound."""
+
+    return _CURRENT if _CURRENT is not None else LanePolicy()
+
+
+__all__ = [
+    "INSTRUCTIONS_CAP",
+    "TRUNCATION_MARKER",
+    "LanePolicy",
+    "attach_policy",
+    "coerce",
+    "current_policy",
+    "detach_policy",
+]

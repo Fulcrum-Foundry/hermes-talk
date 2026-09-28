@@ -208,7 +208,7 @@ def test_worker_records_a_real_success_as_finished(monkeypatch):
     run = _wait_terminal(run_id)
     assert run["status"] == "done"
     assert talk_runs.run_outcome(run) == talk_runs.OUTCOME_SUCCESS
-    assert "finished" in _spoken(run)
+    assert "is done" in _spoken(run)
     assert "partial" not in _spoken(run)
 
 
@@ -314,7 +314,7 @@ def test_worker_waits_for_parked_child_results_and_synthesizes_once(monkeypatch)
     # Exactly one follow-up run, on the same session, and it was the synthesis prompt.
     assert len(submissions) == 2
     assert submissions[1] == talk_host.CONTINUATION_PROMPT
-    assert "finished" in _spoken(run)
+    assert "is done" in _spoken(run)
 
 
 def test_children_that_never_report_leave_an_honest_incomplete(monkeypatch):

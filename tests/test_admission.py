@@ -400,7 +400,9 @@ def test_delegate_task_threads_the_declaration_into_the_host(monkeypatch):
     seen: dict = {}
 
     class _Host:
-        def run_agent(self, task, background=True, *, execution_mode=None, resource_keys=None):
+        def run_agent(
+            self, task, background=True, *, execution_mode=None, resource_keys=None, brief=None
+        ):
             seen.update(
                 task=task, background=background, mode=execution_mode, keys=resource_keys
             )
@@ -416,8 +418,8 @@ def test_delegate_task_threads_the_declaration_into_the_host(monkeypatch):
         },
     )
     assert result.startswith("WORK_STARTED")
+    assert seen.pop("task").endswith("\naudit it\n")  # the plain brief (Talk 0.25, #65)
     assert seen == {
-        "task": "audit it",
         "background": True,
         "mode": "parallel_read_only",
         "keys": ("/repo", "prod"),

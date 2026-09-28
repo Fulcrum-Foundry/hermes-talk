@@ -39,16 +39,18 @@ import hashlib
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass
 from typing import Any
 
 try:
-    from . import talk_apiserver, talk_config, talk_runs
+    from . import talk_apiserver, talk_config, talk_lane, talk_runs
 except ImportError:  # pragma: no cover - flat-module fallback (Hermes file-path load)
     import talk_apiserver
     import talk_config
+    import talk_lane
     import talk_runs
 
 _log = logging.getLogger(__name__)
@@ -144,6 +146,128 @@ def _read_only(request: dict) -> bool:
     return request.get("read_only") is True
 
 
+# -- consent owner self-notify (Talk 0.25, #67) --------------------------------
+#
+# "I need your approval to text you" is the machinery asking the caller for
+# permission to do what the caller just asked, to the caller. A message send
+# whose destination IS the bound caller is the caller messaging themselves on
+# their own channel; it is granted here, recorded as granted, never spoken.
+
+#: Argument keys a host approval request uses for a message destination.
+DESTINATION_KEYS = (
+    "destination",
+    "to",
+    "recipient",
+    "recipients",
+    "phone",
+    "phone_number",
+    "number",
+    "handle",
+    "address",
+    "chat_id",
+    "channel",
+)
+_SEND_WORDS = re.compile(
+    r"\b(?:send|sends|sending|text|texts|texting|sms|message|messages|messaging|imessage|"
+    r"notify|dm|whatsapp|signal|telegram|email|e-mail|mail)\b",
+    re.IGNORECASE,
+)
+_HANDLE_STRIP = re.compile(r"[\s().\-]+")
+
+
+def normalize_handle(value: Any) -> str:
+    """One comparable form for a phone number or chat handle.
+
+    Digits-only for anything that looks like a phone number (a leading ``1``
+    on an 11-digit North American number is dropped, ``+`` and punctuation
+    ignored); lowercase, whitespace-free otherwise. Never raises.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for prefix in ("tel:", "sms:", "sip:", "mailto:"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix) :]
+    text = text.split("@", 1)[0] if text.lower().startswith(("+", "1")) and "@" in text else text
+    compact = _HANDLE_STRIP.sub("", text)
+    digits = compact.lstrip("+")
+    if digits.isdigit() and len(digits) >= 7:
+        if len(digits) == 11 and digits.startswith("1"):
+            digits = digits[1:]
+        return digits
+    return compact.lower()
+
+
+def _first_destination(value: Any) -> str | None:
+    if isinstance(value, (list, tuple)):
+        return _first_destination(value[0]) if len(value) == 1 else None
+    if isinstance(value, dict):
+        for key in DESTINATION_KEYS:
+            if key in value:
+                return _first_destination(value[key])
+        return None
+    text = str(value or "").strip()
+    return text or None
+
+
+def request_destination(request: dict) -> str | None:
+    """Where a message-send request is addressed, from whichever key carries it.
+
+    Reads a top-level ``destination`` first (the field this module adds),
+    then the request's ``args`` under the usual names. A request that lists
+    more than one recipient has no single destination and returns ``None``.
+    """
+
+    if not isinstance(request, dict):
+        return None
+    direct = request.get("destination")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    args = request.get("args")
+    if isinstance(args, dict):
+        found = _first_destination(args)
+        if found:
+            return found
+    return None
+
+
+def _is_message_send(request: dict) -> bool:
+    if request.get("kind") in ("message_send", "send_message", "message"):
+        return True
+    action = str(
+        request.get("action") or request.get("description") or request.get("pattern_key") or ""
+    )
+    return bool(_SEND_WORDS.search(action))
+
+
+def is_self_notify(request: dict, caller_key: str | None) -> bool:
+    """True when ``request`` is a message send addressed to the bound caller.
+
+    ``caller_key`` is the caller's own handle on this lane (a phone number or
+    chat handle, compared after :func:`normalize_handle`) or the opaque
+    binding key, which matches a request carrying the same ``binding_key`` /
+    ``destination_key``. No caller, no destination, more than one recipient,
+    or an action that is not a message send: ``False`` — never widen consent
+    on a guess.
+    """
+
+    if not isinstance(request, dict) or not caller_key:
+        return False
+    if not _is_message_send(request):
+        return False
+    key = str(caller_key).strip()
+    for field_name in ("binding_key", "destination_key"):
+        bound = request.get(field_name)
+        if isinstance(bound, str) and bound and bound == key:
+            return True
+    destination = request_destination(request)
+    if not destination:
+        return False
+    want = normalize_handle(key)
+    return bool(want) and normalize_handle(destination) == want
+
+
 def already_requested(previous: list[dict], request: dict) -> bool:
     """True when a READ-ONLY ``request`` duplicates one already in ``previous``.
 
@@ -173,14 +297,18 @@ def requested_this_session() -> list[dict]:
         return [dict(entry) for entry in _REQUESTED]
 
 
-def _note_requested(run_id: int, request: dict, *, outcome: str | None) -> None:
+def _note_requested(
+    run_id: int, request: dict, *, outcome: str | None, reason: str | None = None
+) -> None:
     action, args_hash = request_identity(request)
     entry = {
         "run_id": run_id,
         "action": action,
         "args_hash": args_hash,
         "read_only": _read_only(request),
+        "destination": request_destination(request),
         "outcome": outcome,
+        "reason": reason,
         "ts": time.time(),
     }
     with _LOCK:
@@ -383,6 +511,22 @@ def _register(run_id: int, api_run_id: str, event: dict) -> None:
 
     raw_request_id = event.get("request_id")
     request_id = raw_request_id if isinstance(raw_request_id, str) and raw_request_id else None
+    if "destination" not in event:
+        # The field this module reads; recorded on the request so the ledger
+        # and a later reader see the same destination the decision used.
+        event["destination"] = request_destination(event)
+    caller = talk_lane.current_policy().caller_handle
+    if is_self_notify(event, caller) and "once" in _narrow_choices(event):
+        _log.info(
+            "run %s wants to message the caller on their own channel (%s) — granting, "
+            "not asking",
+            run_id,
+            _request_text(event)[:80],
+        )
+        _note_requested(run_id, event, outcome="once", reason="self_notify")
+        _annotate(run_id, "once: granted (self_notify — a message to the caller themselves)")
+        _spawn_daemon(_post_choice, api_run_id, "once", request_id, name="talk-approval-self")
+        return
     if already_requested(requested_this_session(), event) and "once" in _narrow_choices(event):
         _log.info(
             "run %s repeated an already-granted read-only approval (%s) — auto-resolving, "
@@ -390,7 +534,7 @@ def _register(run_id: int, api_run_id: str, event: dict) -> None:
             run_id,
             _request_text(event)[:80],
         )
-        _note_requested(run_id, event, outcome="once")
+        _note_requested(run_id, event, outcome="once", reason="dedupe")
         _annotate(run_id, "once: auto-resolved (identical read-only request already granted)")
         _spawn_daemon(_post_choice, api_run_id, "once", request_id, name="talk-approval-dedupe")
         return
@@ -627,7 +771,7 @@ def resolve(run_id: int, choice: str) -> str:
             pending.cancel_timer()
     if pending is None:
         return (
-            f"I don't have a pending approval for run {run_id} — it may already "
+            "I don't have a pending approval for that work — it may already "
             "be answered or timed out."
         )
     if choice not in pending.choices:
@@ -637,8 +781,8 @@ def resolve(run_id: int, choice: str) -> str:
         )
     if not claimed:
         return (
-            f"I'm already sending an answer for run {run_id} — ask me in a "
-            "moment and I'll have the receipt."
+            "I'm already sending that answer — ask me in a moment and I'll know "
+            "whether it landed."
         )
 
     # Off the courtesy-wait path: the POST runs on a daemon with a bounded
@@ -675,37 +819,34 @@ def resolve(run_id: int, choice: str) -> str:
 
         _spawn_daemon(_late, name="talk-approval-late")
         return (
-            f"Sending '{choice}' for run {run_id} — the server hasn't answered "
-            "yet; ask me in a moment and I'll have the receipt."
+            f"Sending '{choice}' — no confirmation yet; ask me in a moment and "
+            "I'll know whether it landed."
         )
     if verdict == "err":
         _reopen(run_id, pending)
         return (
-            f"That answer didn't go through ({detail}) — the approval for run "
-            f"{run_id} is still open; answer again, or let it time out denied."
+            f"That answer didn't go through ({detail}) — the question is still "
+            "open; answer again, or let it time out denied."
         )
     if verdict == "gone":
         _clear(run_id)
         _annotate(run_id, f"{choice}: the host says it was already answered or expired")
-        return f"The host says run {run_id}'s approval was already answered or expired."
+        return "That question was already answered or expired."
 
     _clear(run_id)
     _annotate(run_id, f"{choice}: accepted")
     _note_outcome(run_id, choice)
     if choice == "deny":
         return (
-            f"Denied — run {run_id} was told no. It will adapt or stop, and "
-            "I'll report when it lands."
+            "Denied — the work was told no. It will adapt or stop, and I'll report "
+            "when it lands."
         )
     if choice == "session":
         return (
-            f"Approved for the rest of run {run_id} — that's as far as voice "
+            "Approved for the rest of that work — that's as far as voice "
             "goes; there is no always. I'll tell you when it lands."
         )
-    return (
-        f"Approved — just this once. Run {run_id} is continuing; I'll tell "
-        "you when it lands."
-    )
+    return "Approved — just this once. The work is continuing; I'll tell you when it lands."
 
 
 def _late_wording(verdict: str, detail: str) -> str:
@@ -826,8 +967,8 @@ def reconcile_from_poll(
         api_run_id,
         {
             "description": (
-                f"run {run_id} is waiting on an approval, but the details were "
-                "lost with its event stream"
+                "the work is waiting on an okay, but the details of what it wants "
+                "to do were lost with its event stream"
             ),
             "choices": ["once", "deny"],
         },
@@ -845,6 +986,7 @@ def reset_for_tests() -> None:
 
 
 __all__ = [
+    "DESTINATION_KEYS",
     "EVENT_APPROVAL_OUTCOME",
     "EVENT_APPROVAL_PROMPT",
     "GRANTABLE_BY_VOICE",
@@ -856,10 +998,13 @@ __all__ = [
     "detach_session",
     "forget_children",
     "has_pending",
+    "is_self_notify",
+    "normalize_handle",
     "note_barge_in",
     "note_prompt_sent",
     "pending_choices",
     "reconcile_from_poll",
+    "request_destination",
     "request_identity",
     "requested_this_session",
     "reset_for_tests",

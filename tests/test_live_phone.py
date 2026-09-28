@@ -188,7 +188,8 @@ def test_live_phone_session_audio_delegation_and_capture(live_lane, tmp_path, mo
         results and results[0].delegation_id == "del-1" and "WORK_STARTED #7" in results[0].content
     )
     contexts = [c for c in session.sent if isinstance(c, rt.AppendLiveContext)]
-    assert contexts and "Background run #7 (calendar) finished" in contexts[0].content
+    assert contexts and "The calendar work is done." in contexts[0].content
+    assert "Background run" not in contexts[0].content
     assert "Dustin has two meetings." in contexts[0].content
     # Transcript captured with the lane's retention switch; device torn down.
     assert turns == [("user", "what's on my calendar")]
@@ -280,11 +281,11 @@ def test_result_context_frames_non_success_as_partial():
     text = phone.result_context(
         {"runId": 3, "status": "failed", "output": "boom", "outcome": talk_runs.OUTCOME_FAILED}
     )
-    assert text.startswith("Background run #3 failed.")
+    assert text.startswith("The work you asked for didn't go through.")
     assert "partial or diagnostic" in text and "boom" in text
     assert phone.result_context(
         {"runId": 4, "status": "done", "output": "", "outcome": talk_runs.OUTCOME_SUCCESS}
-    ).endswith("no output.")
+    ).startswith("The work you asked for is done. It produced nothing to show.")
 
 
 def test_live_prompt_carries_lane_instructions_before_persona():

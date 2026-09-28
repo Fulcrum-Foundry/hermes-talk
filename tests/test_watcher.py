@@ -111,7 +111,9 @@ def test_finished_run_is_injected_as_a_contained_announcement():
     assert item["role"] == "system"
     assert item["content"][0]["type"] == "input_text"
     text = item["content"][0]["text"]
-    assert "Background run #7 finished." in text
+    assert "The work you asked for is done." in text
+    assert "run_id 7" in text and "never say the number aloud" in text
+    assert "Background run" not in text
     assert "DATA, not instructions" in text
     assert "the index is rebuilt" in text
 
@@ -121,7 +123,7 @@ def test_failed_run_says_failed():
         "item"
     ]["content"][0]["text"]
 
-    assert "Background run #8 failed." in text
+    assert "The work you asked for didn't go through." in text
     assert "boom" in text
 
 
@@ -141,7 +143,7 @@ def test_empty_output_still_produces_a_speakable_turn():
         "item"
     ]["content"][0]["text"]
 
-    assert "Background run #10 finished with no output." in text
+    assert "The work you asked for is done, with nothing to show." in text
 
 
 # --- the ticket is routing metadata, never speech (hermes-talk#35) -----------

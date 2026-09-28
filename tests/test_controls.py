@@ -73,7 +73,8 @@ def test_resume_leaves_hold_and_lifts_a_deferral_and_names_ready_results():
     out = talk_tools.execute_talk_tool("resume", {})
     assert not talk_controls.is_holding()
     assert not talk_controls.is_topic_deferred()
-    assert "run(s) 7" in out
+    assert "run_id 7" in out and "say the numbers aloud" in out
+    assert "run(s)" not in out
     scheduler.release_all()
     assert talk_tools.execute_talk_tool("resume", {}) == "Nothing was on hold; carry on."
 
@@ -89,7 +90,7 @@ def test_cancel_job_is_explicit_and_only_a_request(monkeypatch):
     monkeypatch.setattr(talk_host, "host", lambda: _Host())
     out = talk_tools.execute_talk_tool("cancel_job", {"run_id": 12, "reason": "wrong repo"})
     assert calls == [("12", "wrong repo")]
-    assert out.startswith("Stop requested for run 12")
+    assert out.startswith("Stop requested for that work (run_id 12)")
     assert "final outcome will be announced" in out
     assert "cancelled" not in out.lower().replace("stop requested", "")
 

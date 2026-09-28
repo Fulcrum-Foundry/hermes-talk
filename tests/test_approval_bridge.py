@@ -205,7 +205,7 @@ def test_resolve_session_and_deny_post_their_choice(monkeypatch):
     )
     _register(FakeLoop())
 
-    assert "for the rest of run 7" in talk_approvals.resolve(7, "session")
+    assert "for the rest of that work" in talk_approvals.resolve(7, "session")
     _register(FakeLoop())
     assert "Denied" in talk_approvals.resolve(7, "deny")
 
@@ -263,7 +263,7 @@ def test_resolve_without_a_pending_approval_says_so(monkeypatch):
     receipt = talk_approvals.resolve(99, "once")
 
     assert posts == []
-    assert "don't have a pending approval for run 99" in receipt
+    assert "don't have a pending approval for that work" in receipt
 
 
 def test_a_gone_approval_clears_the_record_and_says_so(monkeypatch):
@@ -351,7 +351,7 @@ def test_a_second_answer_while_one_is_in_flight_is_refused(monkeypatch):
     assert started.wait(1.0)
 
     second = talk_approvals.resolve(7, "deny")
-    assert "already sending an answer" in second
+    assert "already sending that answer" in second
 
     release.set()
     assert _wait_for(lambda: not talk_approvals.has_pending(7))
@@ -446,7 +446,7 @@ def test_a_dead_watcher_reconciles_one_generic_prompt_from_the_poll():
     assert len(prompts) == 1
     assert talk_approvals.has_pending(7)
     assert prompts[0]["choices"] == ("once", "deny")
-    assert "details were lost" in prompts[0]["request"]
+    assert "details of what it wants to do were lost" in prompts[0]["request"]
 
     # A non-waiting payload never registers; a stale generation never does.
     talk_approvals.reconcile_from_poll(8, "run_remote_8", {"status": "running"}, generation)

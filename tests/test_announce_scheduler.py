@@ -202,7 +202,7 @@ def test_closing_call_never_plays_a_last_routine_update_but_approvals_pass():
         return wire.headlines()
 
     spoken = asyncio.run(run())
-    assert len(spoken) == 1 and "waiting for approval" in spoken[0]
+    assert len(spoken) == 1 and "needs an okay" in spoken[0]
 
 
 # -- coalescing and repeats -----------------------------------------------------
@@ -224,7 +224,8 @@ def test_three_ready_jobs_produce_one_notice():
 
     spoken, flips = asyncio.run(run())
     assert len(spoken) == 1
-    assert "3 background jobs are ready" in spoken[0]
+    assert "3 things you asked for are ready" in spoken[0]
+    assert "run 1" not in spoken[0] and "job" not in spoken[0]
     for label in ("triage", "outlook", "deploy"):
         assert label in spoken[0]
     assert "ONE short sentence" in spoken[0]
@@ -308,7 +309,7 @@ def test_a_live_heartbeat_still_plays_under_the_deferred_policy():
         return wire.headlines()
 
     spoken = asyncio.run(run())
-    assert len(spoken) == 1 and "still working" in spoken[0]
+    assert len(spoken) == 1 and "still going" in spoken[0]
 
 
 # -- approvals are actionable events ----------------------------------------------

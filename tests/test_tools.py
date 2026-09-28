@@ -466,7 +466,7 @@ def test_delegate_task_needs_a_task():
 
 
 def test_check_work_on_an_empty_registry():
-    assert "Nothing is running" in talk_tools.execute_talk_tool("check_work", {})
+    assert "Nothing is underway" in talk_tools.execute_talk_tool("check_work", {})
 
 
 def test_check_work_lists_a_running_run():
@@ -521,7 +521,8 @@ def test_check_work_by_id_speaks_the_output():
 
 
 def test_check_work_by_unknown_id():
-    assert "don't have a run number" in talk_tools.execute_talk_tool("check_work", {"run_id": 4242})
+    out = talk_tools.execute_talk_tool("check_work", {"run_id": 4242})
+    assert "don't have work numbered" in out
 
 
 def test_check_work_rejects_a_non_numeric_id():
@@ -585,7 +586,10 @@ def test_delegate_task_returns_a_work_started_receipt():
 
     result = talk_tools.execute_talk_tool("delegate_task", {"task": "rebuild the index"})
 
-    assert ctx.calls == [(talk_host.DELEGATE_TOOL_NAME, {"goal": "rebuild the index"})]
+    # Talk 0.25 (#65): the plain brief — the ask under a one-line header.
+    goal = ctx.calls[0][1]["goal"]
+    assert ctx.calls[0][0] == talk_host.DELEGATE_TOOL_NAME
+    assert goal.startswith("[Voice call with the caller, ") and goal.endswith("rebuild the index\n")
     assert result.startswith("WORK_STARTED")
     assert "subagent 4 started" in result
 
